@@ -1,22 +1,21 @@
+# FILE: warsim/simulator/rocket_unit.py (Complete and Corrected)
+
 """
     A PAC-3 Missile Unit
 """
-
 from datetime import datetime
 from typing import List
-
 import numpy as np
 from scipy.interpolate import interp1d
 
-from simulator.cmano_simulator import Unit, Position, Event, CmanoSimulator, units_distance_km, UnitDestroyedEvent
-from utils.angles import signed_heading_diff
+# --- MODIFICATION: Use relative imports for sibling modules ---
+from .cmano_simulator import Unit, Position, Event, CmanoSimulator, units_distance_km, UnitDestroyedEvent
+from utils.angles import signed_heading_diff # This remains absolute, which is correct.
 
 class Rocket(Unit):
     max_deg_sec = 10
     speed_profile_time = np.array([0, 10, 20, 30])
-    #speed_profile_time = np.array([0, 10, 20, 30, 40])
     speed_profile_knots = np.array([500, 2000, 1400, 600])
-    #speed_profile_knots = np.array([400, 2000, 1800, 1200, 500]) #fill_value = (400,500)
     speed_profile = interp1d(speed_profile_time, speed_profile_knots, kind='quadratic', assume_sorted=True,
                              bounds_error=False, fill_value=(500, 600))
 
@@ -36,24 +35,24 @@ class Rocket(Unit):
 
     def update(self, tick_secs: float, sim: CmanoSimulator) -> List[Event]:
         # Check if the target has been hit
-        if units_distance_km(self, self.target) < 1 and sim.unit_exists(self.target.id):
+        if sim.unit_exists(self.target.id) and units_distance_km(self, self.target) < 1:
             sim.remove_unit(self.id)
             sim.remove_unit(self.target.id)
             return [UnitDestroyedEvent(self, self.source, self.target)]
         
+        # Check for friendly fire
         if self.friendly_check:
-            # check if friendly aircraft has been hit
-            friendly_id = 1 if self.source.id == 2 else 2
-            if sim.unit_exists(friendly_id):
-                friendly_unit = sim.get_unit(friendly_id)
-                if units_distance_km(self, friendly_unit) < 1:
-                    sim.remove_unit(self.id)
-                    sim.remove_unit(friendly_id)
-                    return [UnitDestroyedEvent(self, self.source, friendly_unit)]
+            for i in range(1, sim.num_units + 1):
+                if i != self.source.id and sim.unit_exists(i):
+                    friendly_unit = sim.get_unit(i)
+                    if units_distance_km(self, friendly_unit) < 1:
+                        sim.remove_unit(self.id)
+                        sim.remove_unit(friendly_unit.id)
+                        return [UnitDestroyedEvent(self, self.source, friendly_unit)]
 
-        # Check if eol is arrived
+        # Check if end of life is reached
         life_time = (sim.utc_time - self.firing_time).seconds
-        if life_time > Rocket.speed_profile_time[1]:
+        if life_time > Rocket.speed_profile_time[-1]: # Use the last time point
             sim.remove_unit(self.id)
             return []
 
@@ -61,13 +60,9 @@ class Rocket(Unit):
         if self.heading != self.new_heading:
             delta = signed_heading_diff(self.heading, self.new_heading)
             max_deg = Rocket.max_deg_sec * tick_secs
-            if abs(delta) <= max_deg:
-                self.heading = self.new_heading
-            else:
-                self.heading += max_deg if delta >= 0 else -max_deg
+            self.heading = self.new_heading if abs(delta) <= max_deg else (self.heading + (max_deg if delta >= 0 else -max_deg)) % 360
 
         # Update speed
         self.speed = Rocket.speed_profile(life_time)
 
-        # Update position
         return super().update(tick_secs, sim)
