@@ -1,4 +1,4 @@
-# FILE: envs/env_base.py (Complete, Commented, and Syntax Corrected)
+# FILE: envs/env_base.py (Complete, with Final Data Type Fix)
 
 # --- Core Dependencies ---
 import os
@@ -64,12 +64,11 @@ class HHMARLBaseEnv(gymnasium.Env):
         self.missile_wait = {i: 0 for i in range(1, self.args.total_num + 1)}
         self.opp_to_attack = {i: None for i in range(1, self.args.total_num + 1)}
 
-        # --- MODIFICATION: Create simulator with the safe RNG from Gymnasium ---
         self.sim = CmanoSimulator(
             random_generator=self.np_random,
             num_units=self.args.num_agents,
             num_opp_units=self.args.num_opps
-        )  # <--- SYNTAX FIX: The missing closing parenthesis was added here.
+        )
 
         self._reset_scenario(options.get("mode", None) if options else None)
         return self.state(), {}
@@ -86,8 +85,6 @@ class HHMARLBaseEnv(gymnasium.Env):
         info = {}
         return self.state(), self.rewards, terminateds, truncateds, info
 
-    # (The rest of the file remains unchanged from the previous correct versions)
-    # ... All helper methods for state, rewards, plotting, etc. ...
     def fight_state_values(self, agent_id, unit, opp, fri_id=None):
         state = []
         x, y = self.map_limits.relative_position(unit.position.lat, unit.position.lon)
@@ -125,14 +122,16 @@ class HHMARLBaseEnv(gymnasium.Env):
             opp_state.extend(self.opp_ac_values("esc", opp[0], agent_id, opp[1]))
             if len(opp_state) >= 18: break
         if len(opp_state) < 18:
-            opp_state.extend(np.zeros(18 - len(opp_state)))
+            # --- FIX: Ensure consistent dtype ---
+            opp_state.extend(np.zeros(18 - len(opp_state), dtype=np.float32).tolist())
         state.extend(opp_state)
         state.extend(self.friendly_ac_values(agent_id, fri_id))
         return state
 
     def friendly_ac_values(self, agent_id, fri_id=None):
         if not fri_id or not self.sim.unit_exists(fri_id):
-            return np.zeros(5)
+            # --- FIX: Ensure consistent dtype and return type ---
+            return np.zeros(5, dtype=np.float32).tolist()
         else:
             unit = self.sim.get_unit(fri_id)
             x, y = self.map_limits.relative_position(unit.position.lat, unit.position.lon)
@@ -167,11 +166,12 @@ class HHMARLBaseEnv(gymnasium.Env):
             unit.fire_cannon()
         if unit.ac_type == 1 and bool(actions[unit_id][3]):
             if opp_id and unit.missile_remain > 0 and not unit.actual_missile and self.missile_wait[unit_id] == 0:
-                unit.fire_missile(unit, self.sim.get_unit(opp_id), self.sim)
-                if mode == "LowLevel":
-                    self.missile_wait[unit_id] = self.np_random.integers(7, 18)
-                else:
-                    self.missile_wait[unit_id] = self.np_random.integers(8, 13)
+                if self.sim.unit_exists(opp_id):
+                    unit.fire_missile(unit, self.sim.get_unit(opp_id), self.sim)
+                    if mode == "LowLevel":
+                        self.missile_wait[unit_id] = self.np_random.integers(7, 18)
+                    else:
+                        self.missile_wait[unit_id] = self.np_random.integers(8, 13)
         if self.missile_wait[unit_id] > 0 and not bool(unit.actual_missile):
             self.missile_wait[unit_id] -= 1
         return rewards

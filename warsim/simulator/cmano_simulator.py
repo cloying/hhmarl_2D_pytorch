@@ -1,4 +1,4 @@
-# FILE: warsim/simulator/cmano_simulator.py (Complete and Corrected)
+# FILE: warsim/simulator/cmano_simulator.py (Complete and Corrected with Debug Prints)
 
 """
     CmanoSimulator is a simulator of the essential characteristic of CMANO.
@@ -8,6 +8,7 @@ from __future__ import annotations
 from abc import ABC
 from datetime import datetime, timedelta
 from typing import Callable, List, Dict
+import os
 
 # This file should NOT import the 'random' module.
 
@@ -74,22 +75,20 @@ class Unit(ABC):
 
 
 class CmanoSimulator:
-    # --- MODIFICATION: Accept a random number generator instead of creating one ---
     def __init__(self, random_generator, utc_time=datetime.now(), tick_secs=1, num_units=0, num_opp_units=0):
         self.active_units: Dict[int, Unit] = {}
         self.trace_record_units = {}
         self.utc_time = utc_time
         self.tick_secs = tick_secs
-
-        # This is the safe, Gymnasium-provided numpy random generator.
         self.random_generator = random_generator
-
         self._next_unit_id = 1
         self.status_text = None
         self.num_units = num_units
         self.num_opp_units = num_opp_units
+        # --- DEBUG ---
+        self.pid = os.getpid()
+        # --- END DEBUG ---
 
-    # --- The rest of the class is unchanged ---
     def add_unit(self, unit: Unit) -> int:
         self.active_units[self._next_unit_id] = unit
         unit.id = self._next_unit_id
@@ -112,13 +111,34 @@ class CmanoSimulator:
             self._store_unit_state(unit_id)
 
     def do_tick(self) -> List[Event]:
+        # --- DEBUG ---
+        print(f"[DEBUG Worker {self.pid}]    SIM: Entering do_tick...")
+        # --- END DEBUG ---
+
         events = []
+        # Iterate over a copy of the values to prevent issues if units are removed during the loop
         for unit in list(self.active_units.values()):
-            event = unit.update(self.tick_secs, self)
-            events.extend(event)
+            # --- DEBUG ---
+            print(f"[DEBUG Worker {self.pid}]    SIM: Updating unit {unit.id} ({unit.type})...")
+            # --- END DEBUG ---
+
+            # Ensure the unit still exists before updating, as it might have been destroyed by another unit's update
+            if self.unit_exists(unit.id):
+                event = unit.update(self.tick_secs, self)
+                events.extend(event)
+
+        # --- DEBUG ---
+        print(f"[DEBUG Worker {self.pid}]    SIM: All units updated. Advancing time.")
+        # --- END DEBUG ---
+
         self.utc_time += timedelta(seconds=self.tick_secs)
         for unit_id in self.trace_record_units.keys():
             self._store_unit_state(unit_id)
+
+        # --- DEBUG ---
+        print(f"[DEBUG Worker {self.pid}]    SIM: Exiting do_tick.")
+        # --- END DEBUG ---
+
         return events
 
     def _store_unit_state(self, unit_id):

@@ -1,4 +1,4 @@
-# FILE: train_hetero.py (Complete, Commented, with Action Padding)
+# FILE: train_hetero.py (Final Corrected Version)
 
 # --- Core Dependencies ---
 import os
@@ -46,8 +46,6 @@ class VectorizedRolloutBuffer:
         for agent_id in obs.keys():
             if agent_id in self.obs:
                 self.obs[agent_id][self.step] = torch.tensor(obs[agent_id], dtype=torch.float32).to(self.device)
-                # --- MODIFICATION: Store UNPADDED actions in the buffer ---
-                # We store the original, variable-length actions for correct loss calculation later.
                 self.actions[agent_id][self.step] = actions[agent_id]
                 self.logprobs[agent_id][self.step] = logprobs[agent_id]
                 agent_reward_slice = rewards[:, agent_id - 1] if rewards.ndim == 2 else rewards
@@ -141,6 +139,7 @@ if __name__ == "__main__":
 
     # --- Create the Vectorized Environment ---
     env_fns = [lambda: LowLevelEnv(args.env_config) for _ in range(num_workers)]
+    # We can now switch back to AsyncVectorEnv as the underlying error is fixed.
     env = gym.vector.AsyncVectorEnv(env_fns)
 
     models, optimizers = {}, {}
@@ -185,7 +184,6 @@ if __name__ == "__main__":
     obs_dims = {i: obs_space.spaces[i].shape[0] for i in range(1, args.num_agents + 1)}
     act_dims_parts = {i: len(act_space.spaces[i].nvec) for i in range(1, args.num_agents + 1)}
 
-    # --- MODIFICATION: Determine the max number of action parts for padding ---
     max_action_parts = 0
     for i in range(1, args.num_agents + 1):
         if act_dims_parts[i] > max_action_parts:
@@ -219,12 +217,10 @@ if __name__ == "__main__":
                     action_parts = [dist.sample() for dist in dists]
                     logprob = torch.sum(torch.stack([dist.log_prob(act) for dist, act in zip(dists, action_parts)]),
                                         dim=0)
-                    # Note: We store the original, unpadded action tensor here.
                     actions[agent_id] = torch.stack(action_parts, dim=-1).cpu()
                     logprobs[agent_id] = logprob
 
                 if 1 in obs_tensors and 2 in obs_tensors:
-                    # The critic needs unpadded actions for correct value estimation.
                     critic_obs_dict_1 = {'obs_1_own': obs_tensors[1], 'act_1_own': actions[1].to(device),
                                          'obs_2': obs_tensors[2], 'act_2': actions[2].to(device)}
                     val1 = models['ac1_policy'].get_value(critic_obs_dict_1)
@@ -233,58 +229,69 @@ if __name__ == "__main__":
                     val2 = models['ac2_policy'].get_value(critic_obs_dict_2)
                     values = {1: val1, 2: val2}
 
-            # --- MODIFICATION: Pad actions before stacking for the environment step ---
             padded_actions_list = []
             for i in range(1, args.num_agents + 1):
-                action_tensor = actions[i]  # Shape: (num_workers, num_parts)
+                action_tensor = actions[i]
                 num_parts = action_tensor.shape[1]
 
-                # If this agent's action space is smaller than the max, pad it.
                 if num_parts < max_action_parts:
                     padding_needed = max_action_parts - num_parts
-                    # Create padding of zeros: shape (num_workers, padding_needed)
                     padding = torch.zeros((action_tensor.shape[0], padding_needed), dtype=action_tensor.dtype)
-                    # Concatenate the action with the padding.
                     padded_action = torch.cat([action_tensor, padding], dim=1)
                     padded_actions_list.append(padded_action.numpy())
                 else:
                     padded_actions_list.append(action_tensor.numpy())
 
-            # Stack the now uniformly-sized action arrays.
-            env_actions = np.stack(padded_actions_list, axis=1)
-            # --- END MODIFICATION ---
+            # --- BUG FIX: Format actions as a dictionary for the vector environment ---
+            # A vectorized environment with a Dict action space expects a dictionary
+            # of batched actions, not a single stacked numpy array.
+            env_actions = {i: padded_actions_list[i - 1] for i in range(1, args.num_agents + 1)}
+            # --- END FIX ---
 
-            next_obs, rewards, terminateds, truncateds, infos = env.step(env_actions)
+            next_obs, agg_rewards, terminateds, truncateds, infos = env.step(env_actions)
             dones = np.logical_or(terminateds, truncateds)
 
-            # We add the original, UNPADDED actions to the buffer for training.
-            buffer.add(next_obs, actions, logprobs, rewards, dones, values)
+            agent_rewards = np.zeros((num_workers, args.num_agents))
+            per_worker_infos = infos.get("_", [{} for _ in range(num_workers)])
+            final_infos = infos.get("final_info", [None for _ in range(num_workers)])
 
-        # (The rest of the training loop remains the same)
+            for i in range(num_workers):
+                info_source = final_infos[i] if dones[i] and final_infos[i] is not None else per_worker_infos[i]
+                if "agent_rewards" in info_source:
+                    reward_dict = info_source["agent_rewards"]
+                    if isinstance(reward_dict, dict):
+                        for agent_id, reward_val in reward_dict.items():
+                            if 0 <= agent_id - 1 < args.num_agents:
+                                agent_rewards[i, agent_id - 1] = reward_val
+
+            buffer.add(next_obs, actions, logprobs, agent_rewards, dones, values)
+
         # --- B. Advantage Calculation ---
         with torch.no_grad():
             next_values = {}
             if 1 in next_obs and 2 in next_obs:
-                final_obs = infos.get("final_observation", None)
-                if final_obs is not None:
-                    final_obs_1 = final_obs.get(1, next_obs[1])
-                    final_obs_2 = final_obs.get(2, next_obs[2])
-                    last_obs_1 = torch.tensor(np.where(dones[:, None], final_obs_1, next_obs[1]),
-                                              dtype=torch.float32).to(device)
-                    last_obs_2 = torch.tensor(np.where(dones[:, None], final_obs_2, next_obs[2]),
-                                              dtype=torch.float32).to(device)
-                else:
-                    last_obs_1 = torch.tensor(next_obs[1], dtype=torch.float32).to(device)
-                    last_obs_2 = torch.tensor(next_obs[2], dtype=torch.float32).to(device)
+                final_obs_data = infos.get("final_observation", [None] * num_workers)
+
+                last_obs_1_list, last_obs_2_list = [], []
+                for i in range(num_workers):
+                    if dones[i] and final_obs_data[i] is not None:
+                        last_obs_1_list.append(final_obs_data[i].get(1, next_obs[1][i]))
+                        last_obs_2_list.append(final_obs_data[i].get(2, next_obs[2][i]))
+                    else:
+                        last_obs_1_list.append(next_obs[1][i])
+                        last_obs_2_list.append(next_obs[2][i])
+
+                last_obs_1 = torch.tensor(np.array(last_obs_1_list), dtype=torch.float32).to(device)
+                last_obs_2 = torch.tensor(np.array(last_obs_2_list), dtype=torch.float32).to(device)
 
                 critic_obs_final_1 = {'obs_1_own': last_obs_1,
-                                      'act_1_own': torch.zeros(num_workers, act_dims_parts[1]).to(device),
+                                      'act_1_own': torch.zeros(num_workers, act_dims_parts[1], device=device),
                                       'obs_2': last_obs_2,
-                                      'act_2': torch.zeros(num_workers, act_dims_parts[2]).to(device)}
+                                      'act_2': torch.zeros(num_workers, act_dims_parts[2], device=device)}
                 critic_obs_final_2 = {'obs_1_own': last_obs_2,
-                                      'act_1_own': torch.zeros(num_workers, act_dims_parts[2]).to(device),
+                                      'act_1_own': torch.zeros(num_workers, act_dims_parts[2], device=device),
                                       'obs_2': last_obs_1,
-                                      'act_2': torch.zeros(num_workers, act_dims_parts[1]).to(device)}
+                                      'act_2': torch.zeros(num_workers, act_dims_parts[1], device=device)}
                 next_values = {
                     1: models['ac1_policy'].get_value(critic_obs_final_1),
                     2: models['ac2_policy'].get_value(critic_obs_final_2)
@@ -301,6 +308,9 @@ if __name__ == "__main__":
                     agent_id_map = {'ac1_policy': 1, 'ac2_policy': 2}
                     other_agent_id_map = {'ac1_policy': 2, 'ac2_policy': 1}
                     agent_id, other_agent_id = agent_id_map[policy_id], other_agent_id_map[policy_id]
+
+                    if agent_id not in mini_batch or other_agent_id not in mini_batch:
+                        continue
 
                     batch_actor_obs = mini_batch[agent_id]['obs']
                     batch_critic_obs = {
@@ -335,14 +345,16 @@ if __name__ == "__main__":
         # --- D. Logging, Checkpointing, and Visualization ---
         avg_reward = 0
         if "final_info" in infos:
-            episodic_returns = [info.get("episode", {}).get("r", 0) for info in infos.get("final_info", []) if info]
-            if episodic_returns:
-                avg_reward = np.mean(episodic_returns)
+            final_infos_list = [info for info in infos["final_info"] if info is not None]
+            if final_infos_list:
+                episodic_returns = [info["episode"]["r"].item() for info in final_infos_list if "episode" in info]
+                if episodic_returns:
+                    avg_reward = np.mean(episodic_returns)
 
         writer.add_scalar("charts/avg_episodic_return", avg_reward, update)
         pbar.set_description(f"Update {update}, Avg Return: {avg_reward:.2f}")
 
-        if update % 50 == 0:
+        if update > 0 and update % 50 == 0:
             print(f"\nSaving models at update {update}...")
             policy_dir = 'policies'
             os.makedirs(policy_dir, exist_ok=True)
@@ -355,8 +367,11 @@ if __name__ == "__main__":
 
             print(f"Generating plot for update {update}...")
             plot_path = plots_dir / f"update_{update:05d}_return_{avg_reward:.2f}.png"
-            env.call('plot', plot_path)
-            print(f"Plot saved to {plot_path}")
+            try:
+                env.call_on(0, 'plot', plot_path)
+                print(f"Plot saved to {plot_path}")
+            except Exception as e:
+                print(f"Could not generate plot: {e}")
 
     # --- Cleanup ---
     env.close()
