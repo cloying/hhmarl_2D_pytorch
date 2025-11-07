@@ -1,4 +1,4 @@
-# FILE: warsim/simulator/cmano_simulator.py (Complete and Corrected with Debug Prints)
+# FILE: warsim/simulator/cmano_simulator.py (Cleaned, Final Version)
 
 """
     CmanoSimulator is a simulator of the essential characteristic of CMANO.
@@ -10,10 +10,7 @@ from datetime import datetime, timedelta
 from typing import Callable, List, Dict
 import os
 
-# This file should NOT import the 'random' module.
-
 # --- Local Project Imports ---
-# (Assuming utils is at the project root)
 from utils.geodesics import geodetic_direct, geodetic_distance_km, geodetic_bearing_deg
 
 # --- Constants
@@ -22,7 +19,6 @@ knots_to_ms = 0.514444
 
 # --- Classes
 class Position:
-    # ... (rest of the class is unchanged)
     def __init__(self, lat: float, lon: float, alt: float):
         self.lat = lat
         self.lon = lon
@@ -33,7 +29,6 @@ class Position:
 
 
 class Event(ABC):
-    # ... (rest of the class is unchanged)
     def __init__(self, name, origin: Unit):
         self.name = name
         self.origin = origin
@@ -43,7 +38,6 @@ class Event(ABC):
 
 
 class UnitDestroyedEvent(Event):
-    # ... (rest of the class is unchanged)
     def __init__(self, origin: Unit, unit_killer: Unit, unit_destroyed: Unit):
         super().__init__("UnitDestroyedEvent", origin)
         self.unit_killer = unit_killer
@@ -54,7 +48,6 @@ class UnitDestroyedEvent(Event):
 
 
 class Unit(ABC):
-    # ... (rest of the class is unchanged)
     def __init__(self, type: str, position: Position, heading: float, speed_knots: float):
         if heading >= 360 or heading < 0: raise Exception(f"Unit.__init__: bad heading {heading}")
         self.type = type
@@ -85,9 +78,6 @@ class CmanoSimulator:
         self.status_text = None
         self.num_units = num_units
         self.num_opp_units = num_opp_units
-        # --- DEBUG ---
-        self.pid = os.getpid()
-        # --- END DEBUG ---
 
     def add_unit(self, unit: Unit) -> int:
         self.active_units[self._next_unit_id] = unit
@@ -111,33 +101,17 @@ class CmanoSimulator:
             self._store_unit_state(unit_id)
 
     def do_tick(self) -> List[Event]:
-        # --- DEBUG ---
-        print(f"[DEBUG Worker {self.pid}]    SIM: Entering do_tick...")
-        # --- END DEBUG ---
-
         events = []
         # Iterate over a copy of the values to prevent issues if units are removed during the loop
         for unit in list(self.active_units.values()):
-            # --- DEBUG ---
-            print(f"[DEBUG Worker {self.pid}]    SIM: Updating unit {unit.id} ({unit.type})...")
-            # --- END DEBUG ---
-
-            # Ensure the unit still exists before updating, as it might have been destroyed by another unit's update
+            # Ensure the unit still exists before updating
             if self.unit_exists(unit.id):
                 event = unit.update(self.tick_secs, self)
                 events.extend(event)
 
-        # --- DEBUG ---
-        print(f"[DEBUG Worker {self.pid}]    SIM: All units updated. Advancing time.")
-        # --- END DEBUG ---
-
         self.utc_time += timedelta(seconds=self.tick_secs)
         for unit_id in self.trace_record_units.keys():
             self._store_unit_state(unit_id)
-
-        # --- DEBUG ---
-        print(f"[DEBUG Worker {self.pid}]    SIM: Exiting do_tick.")
-        # --- END DEBUG ---
 
         return events
 

@@ -85,7 +85,7 @@ class LowLevelEnv(HHMARLBaseEnv):
 
     def lowlevel_state(self, mode, agent_id=None, **kwargs):
         """
-        Constructs the observation dictionary, including enhanced shape and dtype debugging.
+        Constructs the observation dictionary for the low-level policies.
         """
         state_dict = {}
         ids_to_process = self.observation_space.keys()
@@ -107,21 +107,8 @@ class LowLevelEnv(HHMARLBaseEnv):
                     state = np.zeros(self.obs_dim_map[ag_id], dtype=np.float32)
             else:
                 state = np.zeros(self.obs_dim_map[ag_id], dtype=np.float32)
-            state_dict[ag_id] = np.array(state, dtype=np.float32)
 
-        # --- ENHANCED SHAPE DEBUGGING ---
-        pid = os.getpid()
-        print(f"--- [DEBUG Worker {pid}] Final Observation Check ---")
-        for ag_id, obs_array in state_dict.items():
-            expected_dim = self.obs_dim_map[ag_id]
-            actual_shape = obs_array.shape
-            actual_dtype = obs_array.dtype
-            is_correct_shape = (actual_shape == (expected_dim,))
-            print(f"  Agent {ag_id}: Expected Shape=({expected_dim},), Actual Shape={actual_shape}, DType={actual_dtype}, Correct Shape? -> {is_correct_shape}")
-            if not is_correct_shape:
-                print(f"    !!!! MISMATCH DETECTED FOR AGENT {ag_id} !!!!")
-        print("--------------------------------------------------")
-        # --- END DEBUGGING ---
+            state_dict[ag_id] = np.array(state, dtype=np.float32)
 
         if agent_id is not None:
             return {agent_id: state_dict[agent_id]}
@@ -137,13 +124,10 @@ class LowLevelEnv(HHMARLBaseEnv):
                 u = self.sim.get_unit(i)
                 if i <= self.args.num_agents or self.args.level >= 4:
                     if i > self.args.num_agents:
-                        # For opponent policies, the 'action' dict is not used, so we create a placeholder
                         actions_for_opp = self._policy_actions(policy_type=self.opp_mode, agent_id=i, unit=u)
                         rewards = self._take_base_action("LowLevel", u, i, self.opp_to_attack.get(i), actions_for_opp, rewards)
                     else:
-                        # For our trainable agents, the 'action' dict contains their actions
                         rewards = self._take_base_action("LowLevel", u, i, self.opp_to_attack.get(i), action, rewards)
-                        # Store stats for reward shaping
                         rewards[i] = 0
                         if self.opp_to_attack.get(i) and self.sim.unit_exists(self.opp_to_attack[i]):
                             opp_stats[i] = [self._focus_angle(i, self.opp_to_attack[i], True),

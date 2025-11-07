@@ -1,4 +1,4 @@
-# FILE: envs/env_base.py (Complete, with Final Data Type Fix)
+# FILE: envs/env_base.py (Cleaned, Final Version)
 
 # --- Core Dependencies ---
 import os
@@ -122,7 +122,6 @@ class HHMARLBaseEnv(gymnasium.Env):
             opp_state.extend(self.opp_ac_values("esc", opp[0], agent_id, opp[1]))
             if len(opp_state) >= 18: break
         if len(opp_state) < 18:
-            # --- FIX: Ensure consistent dtype ---
             opp_state.extend(np.zeros(18 - len(opp_state), dtype=np.float32).tolist())
         state.extend(opp_state)
         state.extend(self.friendly_ac_values(agent_id, fri_id))
@@ -130,7 +129,6 @@ class HHMARLBaseEnv(gymnasium.Env):
 
     def friendly_ac_values(self, agent_id, fri_id=None):
         if not fri_id or not self.sim.unit_exists(fri_id):
-            # --- FIX: Ensure consistent dtype and return type ---
             return np.zeros(5, dtype=np.float32).tolist()
         else:
             unit = self.sim.get_unit(fri_id)
@@ -160,11 +158,16 @@ class HHMARLBaseEnv(gymnasium.Env):
         return state
 
     def _take_base_action(self, mode, unit, unit_id, opp_id, actions, rewards=None):
-        unit.set_heading((unit.heading + (actions[unit_id][0] - 6) * 15) % 360)
-        unit.set_speed(100 + ((unit.max_speed - 100) / 8) * actions[unit_id][1])
-        if bool(actions[unit_id][2]) and unit.cannon_remain_secs > 0:
+        # The actions dictionary is now expected to be keyed by agent ID
+        if unit_id not in actions:
+            return rewards
+
+        act = actions[unit_id]
+        unit.set_heading((unit.heading + (act[0] - 6) * 15) % 360)
+        unit.set_speed(100 + ((unit.max_speed - 100) / 8) * act[1])
+        if bool(act[2]) and unit.cannon_remain_secs > 0:
             unit.fire_cannon()
-        if unit.ac_type == 1 and bool(actions[unit_id][3]):
+        if unit.ac_type == 1 and bool(act[3]):
             if opp_id and unit.missile_remain > 0 and not unit.actual_missile and self.missile_wait[unit_id] == 0:
                 if self.sim.unit_exists(opp_id):
                     unit.fire_missile(unit, self.sim.get_unit(opp_id), self.sim)

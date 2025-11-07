@@ -1,4 +1,4 @@
-# FILE: train_hetero.py (Final Corrected Version)
+# FILE: train_hetero.py (Cleaned, Final Version)
 
 # --- Core Dependencies ---
 import os
@@ -139,7 +139,6 @@ if __name__ == "__main__":
 
     # --- Create the Vectorized Environment ---
     env_fns = [lambda: LowLevelEnv(args.env_config) for _ in range(num_workers)]
-    # We can now switch back to AsyncVectorEnv as the underlying error is fixed.
     env = gym.vector.AsyncVectorEnv(env_fns)
 
     models, optimizers = {}, {}
@@ -242,11 +241,7 @@ if __name__ == "__main__":
                 else:
                     padded_actions_list.append(action_tensor.numpy())
 
-            # --- BUG FIX: Format actions as a dictionary for the vector environment ---
-            # A vectorized environment with a Dict action space expects a dictionary
-            # of batched actions, not a single stacked numpy array.
             env_actions = {i: padded_actions_list[i - 1] for i in range(1, args.num_agents + 1)}
-            # --- END FIX ---
 
             next_obs, agg_rewards, terminateds, truncateds, infos = env.step(env_actions)
             dones = np.logical_or(terminateds, truncateds)
