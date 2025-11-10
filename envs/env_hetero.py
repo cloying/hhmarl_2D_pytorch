@@ -54,6 +54,7 @@ class LowLevelEnv(HHMARLBaseEnv):
         self.action_space = gymnasium.spaces.Dict(act_spaces)
         self._agent_ids = set(range(1, self.args.num_agents + 1))
         super().__init__(self.args.map_size)
+        self.total_steps_elapsed = 0
 
         if self.args.level >= 4:
             self._get_policies("LowLevel")
@@ -117,6 +118,7 @@ class LowLevelEnv(HHMARLBaseEnv):
     def _take_action(self, action):
         """Coordinates the actions of agents and opponents for one simulation step."""
         self.steps += 1
+        self.total_steps_elapsed += self.args.num_workers  # Increment by number of parallel envs
         rewards = {}
         opp_stats = {}
         for i in range(1, self.args.total_num + 1):
@@ -140,23 +142,37 @@ class LowLevelEnv(HHMARLBaseEnv):
     def _get_rewards(self, rewards, events, opp_stats):
         """Calculates and aggregates rewards from combat events and reward shaping."""
         rews, destroyed_ids, _ = self._combat_rewards(events, opp_stats, mode="LowLevel")
+
+        shaping_reward_scale = 1.0
+        if self.args.use_reward_schedule:
+            progress = min(1.0, self.total_steps_elapsed / self.args.shaping_decay_timesteps)
+            shaping_reward_scale = self.args.shaping_scale_initial * (
+                        1 - progress) + self.args.shaping_scale_final * progress
+
         if self.agent_mode == "fight":
             for agent_id, stats in opp_stats.items():
                 if self.sim.unit_exists(agent_id):
                     focus_angle_norm, distance_norm = stats[0], stats[1]
-                    distance_reward = (1.0 - distance_norm) * 0.01
-                    aim_reward = (1.0 - focus_angle_norm) * 0.01
+
+
+                    distance_reward = (1.0 - distance_norm) * 0.05 * shaping_reward_scale
+                    aim_reward = (1.0 - focus_angle_norm) * 0.05 * shaping_reward_scale
+
+
                     time_penalty = -0.001
                     rews[agent_id].append(distance_reward + aim_reward + time_penalty)
+
         if self.agent_mode == "escape" and self.args.esc_dist_rew:
             for i in range(1, self.args.num_agents + 1):
                 if self.sim.unit_exists(i) and i in rews:
                     opps = self._nearby_object(i)
                     for j, o in enumerate(opps, start=1):
                         if o[2] < 0.06:
-                            rews[i].append(-0.02 / j)
+                            # Apply the scale to escape rewards as well
+                            rews[i].append((-0.02 / j) * shaping_reward_scale)
                         elif o[2] > 0.13:
-                            rews[i].append(0.02 / j)
+                            rews[i].append((0.02 / j) * shaping_reward_scale)
+
         for i in range(1, self.args.num_agents + 1):
             if (self.sim.unit_exists(i) or i in destroyed_ids) and i in rewards:
                 if self.args.glob_frac > 0 and self.agent_mode == "fight":

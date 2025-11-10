@@ -35,7 +35,7 @@ class Config(object):
 
         # --- Hardware and Parallelization ---
         parser.add_argument('--gpu', type=float, default=0, help='Fraction of GPU to use (0 for CPU, 1 for full GPU)')
-        parser.add_argument('--num_workers', type=int, default=4,
+        parser.add_argument('--num_workers', type=int, default=6,
                             help='Number of parallel workers/threads for data collection')
 
         # --- Algorithm Hyperparameters ---
@@ -68,6 +68,17 @@ class Config(object):
                             help="Opponent's pre-trained low-level policy to use for evaluation")
         parser.add_argument('--hier_opp_fight_ratio', type=int, default=75,
                             help='Opponent fight policy selection probability [in %]')
+        #reward schedule implementation
+        parser.add_argument('--use_reward_schedule', type=bool, default=True,
+                            help='Enable adaptive scaling of shaping rewards over time.')
+        parser.add_argument('--shaping_scale_initial', type=float, default=10.0,
+                            help='Initial multiplier for shaping rewards.')
+        parser.add_argument('--shaping_scale_final', type=float, default=1.0,
+                            help='Final multiplier for shaping rewards (should match original value).')
+        parser.add_argument('--shaping_decay_timesteps', type=int, default=3_000_000,
+                            help='How many timesteps until the scale reaches its final value.')
+        parser.add_argument('--total_timesteps', type=int, default=10_000_000,
+                            help='Total timesteps for the training run.')
 
         self.args = parser.parse_args()
         self.set_metrics()

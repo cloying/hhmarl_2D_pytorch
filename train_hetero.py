@@ -138,8 +138,8 @@ if __name__ == "__main__":
     plots_dir.mkdir(exist_ok=True, parents=True)
 
     # --- Create the Vectorized Environment ---
-    env_fns = [lambda: LowLevelEnv(args.env_config) for _ in range(num_workers)]
-    env = gym.vector.AsyncVectorEnv(env_fns)
+    env_fns = [lambda: gym.wrappers.RecordEpisodeStatistics(LowLevelEnv(args.env_config)) for _ in range(num_workers)]
+    env = gym.vector.SyncVectorEnv(env_fns)
 
     models, optimizers = {}, {}
 
@@ -363,7 +363,7 @@ if __name__ == "__main__":
             print(f"Generating plot for update {update}...")
             plot_path = plots_dir / f"update_{update:05d}_return_{avg_reward:.2f}.png"
             try:
-                env.call_on(0, 'plot', plot_path)
+                env.call_at(0, "plot", plot_path)
                 print(f"Plot saved to {plot_path}")
             except Exception as e:
                 print(f"Could not generate plot: {e}")
