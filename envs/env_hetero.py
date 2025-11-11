@@ -134,7 +134,7 @@ class LowLevelEnv(HHMARLBaseEnv):
             return {agent_id: state_dict[agent_id]}
         return state_dict
 
-    def _take_action(self, action):
+    def _take_action(self, action, info):
         """Coordinates the actions of agents and opponents for one simulation step."""
         self.steps += 1
         self.total_steps_elapsed += self.args.num_workers  # Increment by number of parallel envs
@@ -156,9 +156,9 @@ class LowLevelEnv(HHMARLBaseEnv):
                 else:
                     if self.args.level == 3: self._hardcoded_opp_level3(u, i)
 
-        self.rewards = self._get_rewards(rewards, self.sim.do_tick(), opp_stats)
+        self.rewards = self._get_rewards(rewards, self.sim.do_tick(), opp_stats, info)
 
-    def _get_rewards(self, rewards, events, opp_stats):
+    def _get_rewards(self, rewards, events, opp_stats, info):
         """Calculates and aggregates rewards from combat events and reward shaping."""
         rews, destroyed_ids, _ = self._combat_rewards(events, opp_stats, mode="LowLevel")
 
@@ -170,16 +170,26 @@ class LowLevelEnv(HHMARLBaseEnv):
 
         if self.agent_mode == "fight":
             for agent_id, stats in opp_stats.items():
-                if self.sim.unit_exists(agent_id):
+                if self.sim.unit_exists(agent_id) and agent_id in rews:
                     focus_angle_norm, distance_norm = stats[0], stats[1]
-
 
                     distance_reward = (1.0 - distance_norm) * 0.05 * shaping_reward_scale
                     aim_reward = (1.0 - focus_angle_norm) * 0.05 * shaping_reward_scale
-
-
                     time_penalty = -0.001
                     rews[agent_id].append(distance_reward + aim_reward + time_penalty)
+
+                    # Now this will work because `info` is defined
+                    if "reward_components" not in info:
+                        info["reward_components"] = {}
+
+                    kill_reward = sum(r for r in rews.get(agent_id, []) if r in [self.args.rew_scale, -2 * self.args.rew_scale, -5 * self.args.rew_scale])
+
+                    info["reward_components"][agent_id] = {
+                        "aim_reward": aim_reward,
+                        "distance_reward": distance_reward,
+                        "time_penalty": time_penalty,
+                        "kill_reward": kill_reward
+                    }
 
         if self.agent_mode == "escape" and self.args.esc_dist_rew:
             for i in range(1, self.args.num_agents + 1):
@@ -187,7 +197,6 @@ class LowLevelEnv(HHMARLBaseEnv):
                     opps = self._nearby_object(i)
                     for j, o in enumerate(opps, start=1):
                         if o[2] < 0.06:
-                            # Apply the scale to escape rewards as well
                             rews[i].append((-0.02 / j) * shaping_reward_scale)
                         elif o[2] > 0.13:
                             rews[i].append((0.02 / j) * shaping_reward_scale)

@@ -76,9 +76,12 @@ class HHMARLBaseEnv(gymnasium.Env):
 
     def step(self, action):
         """Executes one time step in the environment."""
+        # This is the corrected version from our last discussion.
+        info = {}
         self.rewards = {}
+
         if action:
-            self._take_action(action)
+            self._take_action(action, info)
 
         episode_done = (self.alive_agents <= 0 or self.alive_opps <= 0 or self.steps >= self.args.horizon)
 
@@ -89,9 +92,8 @@ class HHMARLBaseEnv(gymnasium.Env):
         # Add the special "__all__" key that the training scripts use
         terminateds["__all__"] = episode_done
         truncateds["__all__"] = episode_done
-        # --- END OF FIX ---
 
-        info = {}
+        # The info dict, now populated, is returned here.
         return self.state(), self.rewards, terminateds, truncateds, info
 
     def fight_state_values(self, agent_id, unit, opp, fri_id=None):
