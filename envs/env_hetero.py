@@ -178,11 +178,13 @@ class LowLevelEnv(HHMARLBaseEnv):
                     time_penalty = -0.001
                     rews[agent_id].append(distance_reward + aim_reward + time_penalty)
 
-                    # Now this will work because `info` is defined
+                    # --- FIX: Ensure info dict is populated for logging ---
                     if "reward_components" not in info:
                         info["reward_components"] = {}
 
-                    kill_reward = sum(r for r in rews.get(agent_id, []) if r in [self.args.rew_scale, -2 * self.args.rew_scale, -5 * self.args.rew_scale])
+                    # Extract the sparse reward (kill/death) for separate logging
+                    kill_reward = sum(r for r in rews.get(agent_id, []) if
+                                      r in [self.args.rew_scale, -2 * self.args.rew_scale, -5 * self.args.rew_scale])
 
                     info["reward_components"][agent_id] = {
                         "aim_reward": aim_reward,

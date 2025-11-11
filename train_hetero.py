@@ -340,28 +340,55 @@ if __name__ == "__main__":
         # --- D. Logging, Checkpointing, and Visualization ---
         avg_episodic_return = 0
 
-        # Check if episode-end information is available
+        # extract episodic returns from the vectorized environment
+        # "final_info" is a key provided by the RecordEpisodeStatistics wrapper in vectorized environments.
+        # It contains the final information (including reward) for episodes that have just ended.
         if "final_info" in infos:
-            # Create the list of final info dictionaries, filtering out any Nones
+            # Create a list of final info dictionaries, filtering out any 'None' entries
+            # which occur for environments that did not terminate in this step.
             final_infos_list = [info for info in infos["final_info"] if info is not None]
 
             if final_infos_list:
-                # Calculate the average episodic return
+                # Extract the episodic return ('r') from each completed episode's info dictionary.
                 episodic_returns = [info["episode"]["r"].item() for info in final_infos_list if "episode" in info]
+
                 if episodic_returns:
+                    # Calculate the average return only from the episodes that ended in this step.
                     avg_episodic_return = np.mean(episodic_returns)
 
-        # Log the primary metric
+        # Log the primary metric to TensorBoard
         writer.add_scalar("charts/avg_episodic_return", avg_episodic_return, update)
+        if "final_info" in infos:
+            final_infos_list = [info for info in infos["final_info"] if info is not None]
+            if final_infos_list:
+                # Initialize accumulators for average reward components
+                avg_aim = 0
+                avg_dist = 0
+                avg_penalty = 0
+                avg_kill = 0
+                count = 0
 
-        # --- DEFINITIVE FIX: Force the writer to save the buffered data to the file ---
+                for info in final_infos_list:
+                    if "reward_components" in info:
+                        # The components are per-agent, so we average them
+                        for agent_comps in info["reward_components"].values():
+                            avg_aim += agent_comps.get("aim_reward", 0)
+                            avg_dist += agent_comps.get("distance_reward", 0)
+                            avg_penalty += agent_comps.get("time_penalty", 0)
+                            avg_kill += agent_comps.get("kill_reward", 0)
+                            count += 1
+
+                if count > 0:
+                    writer.add_scalar("reward_parts/aim_reward", avg_aim / count, update)
+                    writer.add_scalar("reward_parts/distance_reward", avg_dist / count, update)
+                    writer.add_scalar("reward_parts/time_penalty", avg_penalty / count, update)
+                    writer.add_scalar("reward_parts/kill_reward", avg_kill / count, update)
+
         writer.flush()
-
-        # Update the progress bar description
         pbar.set_description(f"Update {update}, Avg Return: {avg_episodic_return:.2f}")
 
         # Checkpointing and plotting logic (remains the same)
-        if update > 0 and update % 50 == 0:
+        if update > 0 and update % 10 == 0:
             print(f"\nSaving models at update {update}...")
             policy_dir = 'policies'
             os.makedirs(policy_dir, exist_ok=True)
