@@ -35,6 +35,10 @@ class LowLevelEnv(HHMARLBaseEnv):
         act_spaces = {}
         self.obs_dim_map = {}
 
+        self.action_space = gymnasium.spaces.Dict(act_spaces)
+        self._agent_ids = set(range(1, self.args.num_agents + 1))  # This line should already be here, just confirm it.
+        super().__init__(self.args.map_size)
+
         for i in range(1, self.args.num_agents + 1):
             is_ac1_type = (i - 1) % 2 == 0
             if self.agent_mode == "fight":
@@ -72,13 +76,28 @@ class LowLevelEnv(HHMARLBaseEnv):
 
     def step(self, action):
         """
-        Wraps the base environment's step function to make it compatible with
-        Gymnasium's vectorized environments.
+        Wraps the base environment's step function. It adapts the multi-agent
+        dictionary outputs (e.g., terminateds_dict) into the single boolean format
+        expected by standard Gymnasium wrappers like RecordEpisodeStatistics,
+        while preserving the detailed per-agent info in the `info` dictionary.
         """
-        obs, rewards_dict, terminateds, truncateds, info = super().step(action)
+        # 1. Get the dictionary-based outputs from the multi-agent base class
+        obs, rewards_dict, terminateds_dict, truncateds_dict, info = super().step(action)
+
+        # 2. Aggregate reward for the single-agent-style return signature
         aggregated_reward = float(sum(rewards_dict.values())) if rewards_dict else 0.0
+
+        # 3. Extract the global done flags for the single-agent-style return signature
+        terminated = terminateds_dict.get("__all__", False)
+        truncated = truncateds_dict.get("__all__", False)
+
+        # 4. Pass all detailed, per-agent information through the info dict
         info["agent_rewards"] = rewards_dict
-        return obs, aggregated_reward, terminateds, truncateds, info
+        info["terminateds"] = terminateds_dict
+        info["truncateds"] = truncateds_dict
+
+        # 5. Return the data in the format the wrapper expects: (obs, float, bool, bool, dict)
+        return obs, aggregated_reward, terminated, truncated, info
 
     def state(self):
         """Returns the current observation state for all agents."""

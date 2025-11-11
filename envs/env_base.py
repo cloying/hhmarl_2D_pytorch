@@ -51,6 +51,7 @@ class HHMARLBaseEnv(gymnasium.Env):
         self.plt_cfg = PlotConfig()
         self.plt_cfg.units_scale = 20.0
         self.plotter = ScenarioPlotter(self.map_limits, dpi=200, config=self.plt_cfg)
+        self._agent_ids = set()
 
     def reset(self, *, seed=None, options=None):
         """Resets the environment for a new episode."""
@@ -79,9 +80,17 @@ class HHMARLBaseEnv(gymnasium.Env):
         if action:
             self._take_action(action)
 
-        done = (self.alive_agents <= 0 or self.alive_opps <= 0 or self.steps >= self.args.horizon)
-        terminateds = {"__all__": done}
-        truncateds = {"__all__": done}
+        episode_done = (self.alive_agents <= 0 or self.alive_opps <= 0 or self.steps >= self.args.horizon)
+
+        # Create dictionaries for per-agent termination signals
+        terminateds = {agent_id: episode_done for agent_id in self._agent_ids}
+        truncateds = {agent_id: episode_done for agent_id in self._agent_ids}
+
+        # Add the special "__all__" key that the training scripts use
+        terminateds["__all__"] = episode_done
+        truncateds["__all__"] = episode_done
+        # --- END OF FIX ---
+
         info = {}
         return self.state(), self.rewards, terminateds, truncateds, info
 
