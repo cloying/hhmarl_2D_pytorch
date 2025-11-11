@@ -346,29 +346,21 @@ if __name__ == "__main__":
             final_infos_list = [info for info in infos["final_info"] if info is not None]
 
             if final_infos_list:
-                # Calculate and log the average episodic return
+                # Calculate the average episodic return
                 episodic_returns = [info["episode"]["r"].item() for info in final_infos_list if "episode" in info]
                 if episodic_returns:
                     avg_episodic_return = np.mean(episodic_returns)
 
-                # --- START: New Detailed Logging ---
-                # Calculate and log the average reward components
-                # We add checks to handle cases where components might not exist (e.g., in "escape" mode)
-                aim_rewards = [info.get("reward_components", {}).get(1, {}).get("aim_reward", 0) for info in
-                               final_infos_list]
-                dist_rewards = [info.get("reward_components", {}).get(1, {}).get("distance_reward", 0) for info in
-                                final_infos_list]
-
-                if any(aim_rewards):  # Only log if the values are not all zero
-                    writer.add_scalar("charts/avg_aim_reward", np.mean(aim_rewards), update)
-                if any(dist_rewards):
-                    writer.add_scalar("charts/avg_distance_reward", np.mean(dist_rewards), update)
-                # --- END: New Detailed Logging ---
-
-        # Log the primary metric and update the progress bar
+        # Log the primary metric
         writer.add_scalar("charts/avg_episodic_return", avg_episodic_return, update)
+
+        # --- DEFINITIVE FIX: Force the writer to save the buffered data to the file ---
+        writer.flush()
+
+        # Update the progress bar description
         pbar.set_description(f"Update {update}, Avg Return: {avg_episodic_return:.2f}")
 
+        # Checkpointing and plotting logic (remains the same)
         if update > 0 and update % 50 == 0:
             print(f"\nSaving models at update {update}...")
             policy_dir = 'policies'
