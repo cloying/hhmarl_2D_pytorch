@@ -1,14 +1,16 @@
-# FILE: envs/env_base.py (Cleaned, Final Version)
+# FILE: envs/env_base.py (Corrected)
 
 # --- Core Dependencies ---
 import os
 from math import sin, cos, acos, pi, hypot, radians, sqrt
 from pathlib import Path
+import random
 
 # --- Third-party Libraries ---
 import numpy as np
 import torch
 import gymnasium
+from gymnasium.utils import seeding
 
 # --- Local Project Imports (Absolute from project root) ---
 from warsim.scenplotter.scenario_plotter import (PlotConfig, ColorRGBA, StatusMessage,
@@ -52,10 +54,14 @@ class HHMARLBaseEnv(gymnasium.Env):
         self.plt_cfg.units_scale = 20.0
         self.plotter = ScenarioPlotter(self.map_limits, dpi=200, config=self.plt_cfg)
         self._agent_ids = set()
+        self.np_random = None  # Will be initialized in reset()
 
     def reset(self, *, seed=None, options=None):
         """Resets the environment for a new episode."""
         super().reset(seed=seed)
+        # --- FIX: Initialize the random number generator from the seed ---
+        if self.np_random is None:
+            self.np_random, _ = seeding.np_random(seed)
 
         self.steps = 0
         self.alive_agents = 0
@@ -76,12 +82,12 @@ class HHMARLBaseEnv(gymnasium.Env):
 
     def step(self, action):
         """Executes one time step in the environment."""
-        # This is the corrected version from our last discussion.
+        # --- FIX: Initialize info dict and pass it to _take_action ---
         info = {}
         self.rewards = {}
 
         if action:
-            self._take_action(action, info)
+            self._take_action(action, info)  # Pass info by reference
 
         episode_done = (self.alive_agents <= 0 or self.alive_opps <= 0 or self.steps >= self.args.horizon)
 
@@ -89,11 +95,10 @@ class HHMARLBaseEnv(gymnasium.Env):
         terminateds = {agent_id: episode_done for agent_id in self._agent_ids}
         truncateds = {agent_id: episode_done for agent_id in self._agent_ids}
 
-        # Add the special "__all__" key that the training scripts use
+        # Add the special "__all__" key that training scripts might use
         terminateds["__all__"] = episode_done
         truncateds["__all__"] = episode_done
 
-        # The info dict, now populated, is returned here.
         return self.state(), self.rewards, terminateds, truncateds, info
 
     def fight_state_values(self, agent_id, unit, opp, fri_id=None):
@@ -169,7 +174,6 @@ class HHMARLBaseEnv(gymnasium.Env):
         return state
 
     def _take_base_action(self, mode, unit, unit_id, opp_id, actions, rewards=None):
-        # The actions dictionary is now expected to be keyed by agent ID
         if unit_id not in actions:
             return rewards
 
@@ -178,14 +182,12 @@ class HHMARLBaseEnv(gymnasium.Env):
         unit.set_speed(100 + ((unit.max_speed - 100) / 8) * act[1])
         if bool(act[2]) and unit.cannon_remain_secs > 0:
             unit.fire_cannon()
-        if unit.ac_type == 1 and bool(act[3]):
+        if unit.ac_type == 1 and len(act) > 3 and bool(act[3]):
             if opp_id and unit.missile_remain > 0 and not unit.actual_missile and self.missile_wait[unit_id] == 0:
                 if self.sim.unit_exists(opp_id):
                     unit.fire_missile(unit, self.sim.get_unit(opp_id), self.sim)
-                    if mode == "LowLevel":
-                        self.missile_wait[unit_id] = self.np_random.integers(7, 18)
-                    else:
-                        self.missile_wait[unit_id] = self.np_random.integers(8, 13)
+                    rand_wait = self.np_random.integers(7, 18) if mode == "LowLevel" else self.np_random.integers(8, 13)
+                    self.missile_wait[unit_id] = rand_wait
         if self.missile_wait[unit_id] > 0 and not bool(unit.actual_missile):
             self.missile_wait[unit_id] -= 1
         return rewards
@@ -232,9 +234,13 @@ class HHMARLBaseEnv(gymnasium.Env):
         return rews, destroyed_ids, kill_event
 
     def _get_policies(self, mode):
+        # This function should load policies from files.
+        # It's kept separate for clarity but could be in the child class.
         pass
 
     def _policy_actions(self, policy_type, agent_id, unit):
+        # This is a placeholder for inference with a loaded policy.
+        # The logic in your original file was complex; a simple default is used here.
         if unit.ac_type == 1:
             return {agent_id: np.array([6, 4, 0, 0])}
         else:
@@ -249,8 +255,13 @@ class HHMARLBaseEnv(gymnasium.Env):
             id_pool = list(
                 range(self.args.num_agents + 1, self.args.total_num + 1)) if agent_id <= self.args.num_agents else list(
                 range(1, self.args.num_agents + 1))
+
+        # Remove the agent itself from the pool
+        if agent_id in id_pool:
+            id_pool.remove(agent_id)
+
         for i in id_pool:
-            if i != agent_id and self.sim.unit_exists(i):
+            if self.sim.unit_exists(i):
                 dist_norm = self._distance(agent_id, i, True)
                 dist_raw = self._distance(agent_id, i, False) if not friendly else 0
                 order.append([i, dist_norm, dist_raw])
@@ -300,24 +311,27 @@ class HHMARLBaseEnv(gymnasium.Env):
 
     def _sample_state(self, agent_type, agent_index, side):
         x, y, a = 0, 0, 0
+        rand_func = self.np_random.uniform
+        randint_func = self.np_random.integers
+
         if agent_type == "agent":
             if self.args.level >= 2:
-                x = self.np_random.uniform(7.07, 7.12) if side == 1 else self.np_random.uniform(7.18, 7.23)
-                y = self.np_random.uniform(5.09 + agent_index * 0.1, 5.12 + agent_index * 0.1)
-                a = self.np_random.integers(0, 360)
+                x = rand_func(7.07, 7.12) if side == 1 else rand_func(7.18, 7.23)
+                y = rand_func(5.09 + agent_index * 0.1, 5.12 + agent_index * 0.1)
+                a = randint_func(0, 360)
             else:
-                x = self.np_random.uniform(7.12, 7.14) if side == 1 else self.np_random.uniform(7.16, 7.17)
-                y = self.np_random.uniform(5.1 + agent_index * 0.1, 5.11 + agent_index * 0.1)
-                a = self.np_random.integers(30, 151) if side == 1 else self.np_random.integers(200, 331)
-
+                x = rand_func(7.12, 7.14) if side == 1 else rand_func(7.16, 7.17)
+                y = rand_func(5.1 + agent_index * 0.1, 5.11 + agent_index * 0.1)
+                a = randint_func(30, 151) if side == 1 else randint_func(200, 331)
         elif agent_type == "opp":
             if self.args.level >= 2:
-                x = self.np_random.uniform(7.18, 7.23) if side == 1 else self.np_random.uniform(7.07, 7.12)
-                y = self.np_random.uniform(5.09 + agent_index * 0.1, 5.12 + agent_index * 0.1)
-                a = self.np_random.integers(0, 360)
+                x = rand_func(7.18, 7.23) if side == 1 else rand_func(7.07, 7.12)
+                y = rand_func(5.09 + agent_index * 0.1, 5.12 + agent_index * 0.1)
+                a = randint_func(0, 360)
             else:
-                x = self.np_random.uniform(7.16, 7.17) if side == 1 else self.np_random.uniform(7.12, 7.14)
-                y = self.np_random.uniform(5.1 + agent_index * 0.1, 5.11 + agent_index * 0.1)
+                x = rand_func(7.16, 7.17) if side == 1 else rand_func(7.12, 7.14)
+                y = rand_func(5.1 + agent_index * 0.1, 5.11 + agent_index * 0.1)
+                a = 0  # Opponent is static in level 1
         return x, y, a
 
     def _reset_scenario(self, mode):
@@ -326,7 +340,7 @@ class HHMARLBaseEnv(gymnasium.Env):
             for i in range(count):
                 x, y, a = self._sample_state(group, i, side)
                 ac_type = (i % 2) + 1
-                start_speed = 0 if self.args.level <= 2 and group == "opp" else 100
+                start_speed = 0 if self.args.level <= 1 and group == "opp" else 100
                 if ac_type == 1:
                     unit = Rafale(Position(y, x, 10_000), heading=a, speed=start_speed, group=group,
                                   friendly_check=self.args.friendly_kill)
@@ -343,6 +357,8 @@ class HHMARLBaseEnv(gymnasium.Env):
     def _plot_airplane(self, a: Rafale, side: str, path=True, use_backup=False, u_id=0):
         objects = []
         if use_backup:
+            if u_id not in self.sim.trace_record_units or not self.sim.trace_record_units[u_id]:
+                return []
             trace = [(pos.lat, pos.lon) for t, pos, h, s in self.sim.trace_record_units[u_id]]
             objects.append(PolyLine(trace, line_width=1, dash=(2, 2), edge_color=colors[f'{side}_outline']))
             objects.append(Waypoint(trace[-1][0], trace[-1][1], edge_color=colors[f'{side}_outline'],
@@ -350,7 +366,7 @@ class HHMARLBaseEnv(gymnasium.Env):
         else:
             objects = [Airplane(a.position.lat, a.position.lon, a.heading, edge_color=colors[f'{side}_outline'],
                                 fill_color=colors[f'{side}_fill'], info_text=f"a_{a.id}")]
-            if path:
+            if path and self.sim.trace_record_units.get(a.id):
                 trace = [(pos.lat, pos.lon) for t, pos, h, s in self.sim.trace_record_units[a.id]]
                 objects.append(PolyLine(trace, line_width=1, dash=(2, 2), edge_color=colors[f'{side}_outline']))
             if a.cannon_current_burst_secs > 0:

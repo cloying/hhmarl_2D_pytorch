@@ -34,7 +34,7 @@ class Config(object):
                             help='Full path to the directory for saving logs and models')
 
         # --- Hardware and Parallelization ---
-        parser.add_argument('--gpu', type=float, default=0, help='Fraction of GPU to use (0 for CPU, 1 for full GPU)')
+        parser.add_argument('--gpu', type=float, default=1, help='Fraction of GPU to use (0 for CPU, 1 for full GPU)')
         parser.add_argument('--num_workers', type=int, default=6,
                             help='Number of parallel workers/threads for data collection')
 
