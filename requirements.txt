@@ -1,25 +1,18 @@
+# FILE: requirements.txt
+
 # --- Core Deep Learning & Reinforcement Learning ---
-# PyTorch is the main deep learning framework.
-# Gymnasium is the standard API for reinforcement learning environments.
-# NumPy is a fundamental package for numerical operations.
 torch>=2.0.0
 gymnasium==0.29.1
 numpy==1.24.3
 
 # --- Logging and Utilities ---
-# TensorBoard is used for logging and visualizing training metrics.
-# tqdm provides progress bars for training loops.
-# SciPy is used for interpolation in the rocket simulation.
-tensorboard==2.13.0
-protobuf==3.20.3
+tensorboard
 tqdm
 scipy
+imageio
 
 # --- Simulation, Geodesics, and Plotting ---
-# These packages are required for the warsim simulation and visualization backend.
-# Note: pycairo and cartopy may have system-level dependencies.
-# See installation notes below.
-pycairo==1.23.0
+pycairo
 cartopy>=0.21.0
 matplotlib
 geographiclib==2.0
