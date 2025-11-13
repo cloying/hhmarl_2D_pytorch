@@ -1,4 +1,4 @@
-# FILE: envs/env_base.py (Modified with Original Combat Rewards)
+# FILE: envs/env_base.py (Simplified)
 
 # --- Core Dependencies ---
 import os
@@ -8,11 +8,10 @@ import random
 
 # --- Third-party Libraries ---
 import numpy as np
-import torch
 import gymnasium
 from gymnasium.utils import seeding
 
-# --- Local Project Imports (Absolute from project root) ---
+# --- Local Project Imports ---
 from warsim.scenplotter.scenario_plotter import (PlotConfig, ColorRGBA, StatusMessage,
                                                  TopLeftMessage, Airplane, PolyLine,
                                                  Waypoint, Missile, ScenarioPlotter)
@@ -31,6 +30,12 @@ colors = {
 
 
 class HHMARLBaseEnv(gymnasium.Env):
+    """
+    Base class for HHMARL 2D. Contains shared utilities for simulation,
+    observation calculation, and plotting. The main step logic is handled
+    by the child classes (LowLevelEnv, HighLevelEnv).
+    """
+
     def __init__(self, map_size):
         super().__init__()
         self.steps = 0
@@ -39,16 +44,14 @@ class HHMARLBaseEnv(gymnasium.Env):
         self.map_limits = MapLimits(7.0, 5.0, 7.0 + map_size, 5.0 + map_size)
         self.alive_agents = 0
         self.alive_opps = 0
-        self.rewards = {}
         self.opp_to_attack = {}
         self.missile_wait = {}
-        self.hardcoded_opps_escaping = False
-        self.opps_escaping_time = 0
+        self.np_random = None
+
+        # Plotting
         self.plt_cfg = PlotConfig()
         self.plt_cfg.units_scale = 20.0
         self.plotter = ScenarioPlotter(self.map_limits, dpi=200, config=self.plt_cfg)
-        self._agent_ids = set()
-        self.np_random = None
 
     def reset(self, *, seed=None, options=None):
         super().reset(seed=seed)
@@ -58,11 +61,10 @@ class HHMARLBaseEnv(gymnasium.Env):
         self.steps = 0
         self.alive_agents = 0
         self.alive_opps = 0
-        self.hardcoded_opps_escaping = False
-        self.opps_escaping_time = 0
         self.missile_wait = {i: 0 for i in range(1, self.args.total_num + 1)}
         self.opp_to_attack = {i: None for i in range(1, self.args.total_num + 1)}
 
+        # Pass the seeded random generator to the simulator
         self.sim = CmanoSimulator(
             random_generator=self.np_random,
             num_units=self.args.num_agents,
@@ -72,32 +74,15 @@ class HHMARLBaseEnv(gymnasium.Env):
         self._reset_scenario(options.get("mode", None) if options else None)
         return self.state(), {}
 
-    def step(self, action):
-        info = {}
-        self.rewards = {}
+    # NOTE: The step method is now implemented in the child classes.
 
-        if action:
-            self._take_action(action, info)
-
-        episode_done = (self.alive_agents <= 0 or self.alive_opps <= 0 or self.steps >= self.args.horizon)
-
-        terminateds = {agent_id: episode_done for agent_id in self._agent_ids}
-        truncateds = {agent_id: episode_done for agent_id in self._agent_ids}
-        terminateds["__all__"] = episode_done
-        truncateds["__all__"] = episode_done
-
-        return self.state(), self.rewards, terminateds, truncateds, info
-
-    ### --- NEW/MODIFIED METHOD --- ###
     def _combat_rewards(self, events, opp_stats=None, mode="LowLevel"):
         """
-        Calculates rewards based on combat events, including nuanced, state-dependent
-        rewards for kills, mirroring the original repository's logic.
+        Calculates rewards based on combat events (kills, deaths).
         """
         rews = {a: [] for a in range(1, self.args.num_agents + 1)}
         destroyed_ids = []
         s = self.args.rew_scale
-        kill_event = False
 
         # Out-of-boundary punishment
         for i in range(1, self.args.total_num + 1):
@@ -105,68 +90,52 @@ class HHMARLBaseEnv(gymnasium.Env):
                 u = self.sim.get_unit(i)
                 if not self.map_limits.in_boundary(u.position.lat, u.position.lon):
                     self.sim.remove_unit(i)
-                    kill_event = True
                     if i <= self.args.num_agents:
-                        p = -5 if mode == "LowLevel" else -2
+                        p = -50 if mode == "LowLevel" else -20
                         if i in rews: rews[i].append(p * s)
                         destroyed_ids.append(i)
                         self.alive_agents -= 1
                     else:
                         self.alive_opps -= 1
 
-        # Event-based rewards (kills, deaths)
+        # Event-based rewards
         for ev in events:
-            if not isinstance(ev, UnitDestroyedEvent):
-                continue
+            if not isinstance(ev, UnitDestroyedEvent): continue
 
-            # --- AGENT KILLS ---
             if ev.unit_killer.id <= self.args.num_agents and ev.unit_killer.id in rews:
-                # Agent killed an opponent
-                if ev.unit_destroyed.id > self.args.num_agents:
+                if ev.unit_destroyed.id > self.args.num_agents:  # Agent killed an opponent
                     if mode == "LowLevel" and self.agent_mode == "fight":
-                        # Killed by missile: Reward for conserving ammo
                         if ev.origin.type == "Rocket":
                             reward = self._shifted_range(ev.unit_killer.missile_remain / ev.unit_killer.rocket_max, 0,
                                                          1, 1, 1.5) * s
                             rews[ev.unit_killer.id].append(reward)
-                        # Killed by cannon: Reward for ammo conservation AND tactical position
                         else:
                             ammo_rew = self._shifted_range(
                                 ev.unit_killer.cannon_remain_secs / ev.unit_killer.cannon_max, 0, 1, 0.5, 1)
-                            # opp_stats[killer_id][0] is the aspect angle (being behind the target)
-                            if opp_stats and ev.unit_killer.id in opp_stats:
-                                pos_rew = self._shifted_range(opp_stats[ev.unit_killer.id][0], 0, 1, 0.5, 1)
-                                rews[ev.unit_killer.id].append((ammo_rew + pos_rew) * s)
-                            else:  # Fallback if opp_stats is missing for some reason
-                                rews[ev.unit_killer.id].append(ammo_rew * s)
-                    else:  # HighLevel or non-fight mode gets a simple reward
+                            pos_rew = self._shifted_range(opp_stats.get(ev.unit_killer.id, [0, 0])[0], 0, 1, 0.5, 1)
+                            rews[ev.unit_killer.id].append((ammo_rew + pos_rew) * s)
+                    else:
                         rews[ev.unit_killer.id].append(1 * s)
                     self.alive_opps -= 1
-                # Friendly kill
-                elif ev.unit_destroyed.id <= self.args.num_agents:
+                elif ev.unit_destroyed.id <= self.args.num_agents:  # Friendly kill
                     rews[ev.unit_killer.id].append(-2 * s)
                     if self.args.friendly_punish and ev.unit_destroyed.id in rews:
                         rews[ev.unit_destroyed.id].append(-2 * s)
                         destroyed_ids.append(ev.unit_destroyed.id)
                     self.alive_agents -= 1
 
-            # --- OPPONENT KILLS ---
             elif ev.unit_killer.id > self.args.num_agents:
-                # Opponent killed an agent
-                if ev.unit_destroyed.id <= self.args.num_agents and ev.unit_destroyed.id in rews:
+                if ev.unit_destroyed.id <= self.args.num_agents and ev.unit_destroyed.id in rews:  # Opponent killed an agent
                     p = -2 if mode == "LowLevel" else -1
                     rews[ev.unit_destroyed.id].append(p * s)
                     destroyed_ids.append(ev.unit_destroyed.id)
                     self.alive_agents -= 1
-                # Opponent friendly kill (we don't care about this)
-                elif ev.unit_destroyed.id > self.args.num_agents:
+                elif ev.unit_destroyed.id > self.args.num_agents:  # Opponent friendly kill
                     self.alive_opps -= 1
 
-            kill_event = True
+        return rews, destroyed_ids
 
-        return rews, destroyed_ids, kill_event
-
-    # (The rest of the file remains unchanged. Only _combat_rewards is updated.)
+    # --- The rest of the utility functions (_nearby_object, _focus_angle, plot, etc.) remain exactly the same ---
     def fight_state_values(self, agent_id, unit, opp, fri_id=None):
         state = []
         x, y = self.map_limits.relative_position(unit.position.lat, unit.position.lon)
@@ -259,13 +228,10 @@ class HHMARLBaseEnv(gymnasium.Env):
         return rewards
 
     def _get_policies(self, mode):
-        pass
+        pass  # Implemented by child
 
-    def _policy_actions(self, policy_type, agent_id, unit):
-        if unit.ac_type == 1:
-            return {agent_id: np.array([6, 4, 0, 0])}
-        else:
-            return {agent_id: np.array([6, 4, 0])}
+    def _policy_actions(self, policy_type, agent_id, unit):  # Implemented by child
+        return {}
 
     def _nearby_object(self, agent_id, friendly=False):
         order = []
@@ -277,8 +243,7 @@ class HHMARLBaseEnv(gymnasium.Env):
                 range(self.args.num_agents + 1, self.args.total_num + 1)) if agent_id <= self.args.num_agents else list(
                 range(1, self.args.num_agents + 1))
 
-        if agent_id in id_pool:
-            id_pool.remove(agent_id)
+        if agent_id in id_pool: id_pool.remove(agent_id)
 
         for i in id_pool:
             if self.sim.unit_exists(i):
@@ -373,8 +338,7 @@ class HHMARLBaseEnv(gymnasium.Env):
     def _plot_airplane(self, a: Rafale, side: str, path=True, use_backup=False, u_id=0):
         objects = []
         if use_backup:
-            if u_id not in self.sim.trace_record_units or not self.sim.trace_record_units[u_id]:
-                return []
+            if u_id not in self.sim.trace_record_units or not self.sim.trace_record_units[u_id]: return []
             trace = [(pos.lat, pos.lon) for t, pos, h, s in self.sim.trace_record_units[u_id]]
             objects.append(PolyLine(trace, line_width=1, dash=(2, 2), edge_color=colors[f'{side}_outline']))
             objects.append(Waypoint(trace[-1][0], trace[-1][1], edge_color=colors[f'{side}_outline'],
