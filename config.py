@@ -1,3 +1,4 @@
+# FILE: config.py (Modified with Reward Schedule Parameters)
 
 import argparse
 import os
@@ -45,10 +46,12 @@ class Config(object):
         parser.add_argument('--mini_batch_size', type=int, default=256, help='PPO training mini-batch size')
         parser.add_argument('--map_size', type=float, default=0.3 if mode == 0 else 0.5,
                             help='Map size in km (value * 100)')
+        parser.add_argument('--total_timesteps', type=int, default=10_000_000,
+                            help='Total timesteps for the training run.')
 
         # --- Reward Shaping Parameters ---
         parser.add_argument('--glob_frac', type=float, default=0, help='Fraction of reward sharing between agents')
-        parser.add_argument('--rew_scale', type=int, default=1, help='Global reward scaling factor')
+        parser.add_argument('--rew_scale', type=int, default=1, help='Global reward scaling factor for sparse rewards')
         parser.add_argument('--esc_dist_rew', type=bool, default=False,
                             help='Activate per-timestep reward for Escape Training')
         parser.add_argument('--hier_action_assess', type=bool, default=True,
@@ -56,6 +59,18 @@ class Config(object):
         parser.add_argument('--friendly_kill', type=bool, default=True, help='Whether friendly fire is possible')
         parser.add_argument('--friendly_punish', type=bool, default=False,
                             help='If friendly fire occurs, punish both agents')
+
+        ### --- NEW/MODIFIED SECTION: Reward Shaping Schedule --- ###
+        parser.add_argument('--use_reward_schedule', type=bool, default=True,
+                            help='Enable adaptive scaling of shaping rewards over time.')
+        parser.add_argument('--shaping_scale_initial', type=float, default=0.001,
+                            help='Initial multiplier for dense shaping rewards.')
+        parser.add_argument('--shaping_scale_final', type=float, default=0.0,
+                            help='Final multiplier for shaping rewards (should be 0 to fade out).')
+        parser.add_argument('--shaping_decay_timesteps', type=int, default=5_000_000,
+                            help='How many timesteps until the scale reaches its final value (half of total_timesteps).')
+        ### --- END NEW/MODIFIED SECTION --- ###
+
 
         # --- Evaluation-Specific Parameters ---
         parser.add_argument('--eval_info', type=bool, default=True if mode == 2 else False,
@@ -68,17 +83,7 @@ class Config(object):
                             help="Opponent's pre-trained low-level policy to use for evaluation")
         parser.add_argument('--hier_opp_fight_ratio', type=int, default=75,
                             help='Opponent fight policy selection probability [in %]')
-        # reward schedule implementation
-        parser.add_argument('--use_reward_schedule', type=bool, default=True,
-                            help='Enable adaptive scaling of shaping rewards over time.')
-        parser.add_argument('--shaping_scale_initial', type=float, default=10.0,
-                            help='Initial multiplier for shaping rewards.')
-        parser.add_argument('--shaping_scale_final', type=float, default=1.0,
-                            help='Final multiplier for shaping rewards (should match original value).')
-        parser.add_argument('--shaping_decay_timesteps', type=int, default=8_000_000,
-                            help='How many timesteps until the scale reaches its final value.')
-        parser.add_argument('--total_timesteps', type=int, default=10_000_000,
-                            help='Total timesteps for the training run.')
+
 
         self.args = parser.parse_args()
         self.set_metrics()
@@ -122,15 +127,9 @@ class Config(object):
             self.args.eval_level_ag = self.args.eval_level_opp = 5
 
         self.args.eval = True if self.args.render else self.args.eval
-
-        # --- FIX: Calculate and add total_num to the args object ---
-        # This attribute is required by the environment to initialize its state.
         self.args.total_num = self.args.num_agents + self.args.num_opps
-
-        # Pass all arguments to the environment config
         self.args.env_config = {"args": self.args}
 
     @property
     def get_arguments(self):
-        """A property to easily access the parsed arguments object."""
         return self.args
