@@ -1,8 +1,7 @@
-# FILE: config.py (Modified with Reward Schedule Parameters)
+# FILE: config.py (Full Replacement)
 
 import argparse
 import os
-import datetime
 
 
 class Config(object):
@@ -11,8 +10,8 @@ class Config(object):
     """
 
     def __init__(self, mode: int):
-        self.mode = mode
-        parser = argparse.ArgumentParser(description='HHMARL2D Training Config')
+        self.mode = mode  # 0: hetero, 1: hier, 2: eval
+        parser = argparse.ArgumentParser(description='HHMARL2D PyTorch Config')
 
         # --- Training Mode Parameters ---
         parser.add_argument('--level', type=int, default=1, help='Curriculum learning level (1-5)')
@@ -29,93 +28,74 @@ class Config(object):
         parser.add_argument('--restore', type=bool, default=False,
                             help='Restore training from a saved model checkpoint')
         parser.add_argument('--restore_path', type=str, default=None,
-                            help='Full path to the model checkpoint to restore')
+                            help='Full path to the model checkpoint directory to restore')
         parser.add_argument('--log_name', type=str, default=None, help='Experiment name for logging')
         parser.add_argument('--log_path', type=str, default=None,
                             help='Full path to the directory for saving logs and models')
 
         # --- Hardware and Parallelization ---
-        parser.add_argument('--gpu', type=float, default=1, help='Fraction of GPU to use (0 for CPU, 1 for full GPU)')
-        parser.add_argument('--num_workers', type=int, default=6,
-                            help='Number of parallel workers/threads for data collection')
+        parser.add_argument('--gpu', type=float, default=1, help='Enable GPU use (1 for yes, 0 for no)')
+        parser.add_argument('--num_workers', type=int, default=8, help='Number of parallel workers for data collection')
 
         # --- Algorithm Hyperparameters ---
-        parser.add_argument('--epochs', type=int, default=10000, help='Total number of training epochs')
-        parser.add_argument('--batch_size', type=int, default=2000 if mode == 0 else 1000,
-                            help='PPO training batch size')
-        parser.add_argument('--mini_batch_size', type=int, default=256, help='PPO training mini-batch size')
-        parser.add_argument('--map_size', type=float, default=0.3 if mode == 0 else 0.5,
-                            help='Map size in km (value * 100)')
         parser.add_argument('--total_timesteps', type=int, default=10_000_000,
                             help='Total timesteps for the training run.')
+        parser.add_argument('--mini_batch_size', type=int, default=256, help='PPO training mini-batch size')
 
         # --- Reward Shaping Parameters ---
         parser.add_argument('--glob_frac', type=float, default=0, help='Fraction of reward sharing between agents')
-        parser.add_argument('--rew_scale', type=int, default=1, help='Global reward scaling factor for sparse rewards')
-        parser.add_argument('--esc_dist_rew', type=bool, default=False,
-                            help='Activate per-timestep reward for Escape Training')
-        parser.add_argument('--hier_action_assess', type=bool, default=True,
-                            help='Provide action rewards to guide hierarchical training')
+        parser.add_argument('--rew_scale', type=int, default=1,
+                            help='Global reward scaling factor for sparse rewards (e.g., kills)')
         parser.add_argument('--friendly_kill', type=bool, default=True, help='Whether friendly fire is possible')
-        parser.add_argument('--friendly_punish', type=bool, default=False,
-                            help='If friendly fire occurs, punish both agents')
 
         ### --- NEW/MODIFIED SECTION: Reward Shaping Schedule --- ###
         parser.add_argument('--use_reward_schedule', type=bool, default=True,
-                            help='Enable adaptive scaling of shaping rewards over time.')
-        parser.add_argument('--shaping_scale_initial', type=float, default=0.001,
+                            help='Enable linear decay of shaping rewards over time.')
+        parser.add_argument('--shaping_scale_initial', type=float, default=1.0,
                             help='Initial multiplier for dense shaping rewards.')
         parser.add_argument('--shaping_scale_final', type=float, default=0.0,
                             help='Final multiplier for shaping rewards (should be 0 to fade out).')
-        parser.add_argument('--shaping_decay_timesteps', type=int, default=5_000_000,
-                            help='How many timesteps until the scale reaches its final value (half of total_timesteps).')
+        parser.add_argument('--shaping_decay_timesteps', type=int, default=7_000_000,
+                            help='How many timesteps until the scale reaches its final value.')
         ### --- END NEW/MODIFIED SECTION --- ###
 
+        # --- Legacy / Unused in this version ---
+        parser.add_argument('--epochs', type=int, default=10000)
+        parser.add_argument('--batch_size', type=int, default=2000 if mode == 0 else 1000)
+        parser.add_argument('--esc_dist_rew', type=bool, default=False)
+        parser.add_argument('--hier_action_assess', type=bool, default=True)
+        parser.add_argument('--friendly_punish', type=bool, default=False)
+        parser.add_argument('--map_size', type=float, default=0.3 if mode == 0 else 0.5,
+                            help='Map size in km (value * 100)')
 
         # --- Evaluation-Specific Parameters ---
-        parser.add_argument('--eval_info', type=bool, default=True if mode == 2 else False,
-                            help='Provide detailed evaluation statistics in the step() info dict')
-        parser.add_argument('--eval_hl', type=bool, default=True,
-                            help='True=evaluation with Commander, False=evaluation of low-level policies')
-        parser.add_argument('--eval_level_ag', type=int, default=5,
-                            help="Agent's pre-trained low-level policy to use for evaluation")
-        parser.add_argument('--eval_level_opp', type=int, default=4,
-                            help="Opponent's pre-trained low-level policy to use for evaluation")
-        parser.add_argument('--hier_opp_fight_ratio', type=int, default=75,
-                            help='Opponent fight policy selection probability [in %]')
-
+        parser.add_argument('--eval_info', type=bool, default=True if mode == 2 else False)
+        parser.add_argument('--eval_hl', type=bool, default=True)
+        parser.add_argument('--eval_level_ag', type=int, default=5)
+        parser.add_argument('--eval_level_opp', type=int, default=4)
+        parser.add_argument('--hier_opp_fight_ratio', type=int, default=75)
 
         self.args = parser.parse_args()
         self.set_metrics()
 
     def set_metrics(self):
-        """
-        Sets up logging paths and handles logic for restoring models automatically.
-        """
         if self.mode == 0:
             log_name = f'L{self.args.level}_{self.args.agent_mode}_{self.args.num_agents}-vs-{self.args.num_opps}'
         else:
             log_name = f'Commander_{self.args.num_agents}_vs_{self.args.num_opps}'
-
         self.args.log_name = log_name
         self.args.log_path = os.path.join(os.path.dirname(__file__), 'results', self.args.log_name)
 
-        if not self.args.restore and self.mode == 0:
-            if self.args.agent_mode == "fight" and self.args.level > 1:
-                prev_level_path = os.path.join(os.path.dirname(__file__), 'results',
-                                               f'L{self.args.level - 1}_{self.args.agent_mode}_{self.args.num_agents}-vs-{self.args.num_opps}')
-                if os.path.exists(prev_level_path):
-                    self.args.restore = True
+        if not self.args.restore and self.mode == 0 and self.args.level > 1:
+            self.args.restore = True
 
         if self.args.restore and self.args.restore_path is None:
             if self.mode == 0:
-                if self.args.agent_mode == "fight":
-                    restore_dir = f'L{self.args.level - 1}_{self.args.agent_mode}_{self.args.num_agents}-vs-{self.args.num_opps}'
-                else:
-                    restore_dir = f'L3_{self.args.agent_mode}_{self.args.num_agents}-vs-{self.args.num_opps}'
+                restore_dir = f'L{self.args.level - 1}_{self.args.agent_mode}_{self.args.num_agents}-vs-{self.args.num_opps}'
                 self.args.restore_path = os.path.join(os.path.dirname(__file__), 'results', restore_dir)
             else:
-                raise NameError('Specify full restore path to Commander Policy.')
+                raise NameError(
+                    'For high-level training, you must manually specify the restore path if you want to restore.')
 
         if self.mode == 0:
             horizon_level = {1: 150, 2: 200, 3: 300, 4: 350, 5: 400}
