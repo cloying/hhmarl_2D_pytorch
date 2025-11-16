@@ -1,9 +1,10 @@
-# FILE: envs/env_base.py (Full Replacement - With Positional Reward Logic)
+# FILE: envs/env_base.py (Updated with Kill Reward Bonus)
 
 import os
 from math import sin, cos, acos, pi, hypot, radians, sqrt
 from pathlib import Path
 import random
+
 import numpy as np
 import gymnasium
 from gymnasium.utils import seeding
@@ -21,6 +22,7 @@ from utils.angles import sum_angles
 colors = {
     'red_outline': ColorRGBA(0.8, 0.2, 0.2, 1), 'red_fill': ColorRGBA(0.8, 0.2, 0.2, 0.2),
     'blue_outline': ColorRGBA(0.3, 0.6, 0.9, 1), 'blue_fill': ColorRGBA(0.3, 0.6, 0.9, 0.2),
+    'waypoint_outline': ColorRGBA(0.8, 0.8, 0.2, 1), 'waypoint_fill': ColorRGBA(0.8, 0.8, 0.2, 0.2)
 }
 
 
@@ -36,28 +38,32 @@ class HHMARLBaseEnv(gymnasium.Env):
         self.opp_to_attack = {}
         self.missile_wait = {}
         self.np_random = None
+
         self.plt_cfg = PlotConfig()
         self.plt_cfg.units_scale = 20.0
         self.plotter = ScenarioPlotter(self.map_limits, dpi=200, config=self.plt_cfg)
 
     def reset(self, *, seed=None, options=None):
         super().reset(seed=seed)
-        if self.np_random is None: self.np_random, _ = seeding.np_random(seed)
-        self.steps = 0;
-        self.alive_agents = 0;
+        if self.np_random is None:
+            self.np_random, _ = seeding.np_random(seed)
+
+        self.steps = 0
+        self.alive_agents = 0
         self.alive_opps = 0
         self.missile_wait = {i: 0 for i in range(1, self.args.total_num + 1)}
         self.opp_to_attack = {i: None for i in range(1, self.args.total_num + 1)}
+
         self.sim = CmanoSimulator(
             random_generator=self.np_random,
             num_units=self.args.num_agents,
             num_opp_units=self.args.num_opps
         )
+
         self._reset_scenario(options.get("mode", None) if options else None)
         return self.state(), {}
 
-    ### --- MODIFIED REWARD FUNCTION --- ###
-    def _combat_rewards(self, events, opp_stats=None, mode="LowLevel"):
+    def _combat_rewards(self, events, opp_stats=None, mode="LowLevel", kill_reward_bonus=1.0):
         rews = {a: [] for a in range(1, self.args.num_agents + 1)}
         destroyed_ids = []
         s = self.args.rew_scale
@@ -68,9 +74,9 @@ class HHMARLBaseEnv(gymnasium.Env):
                 if not self.map_limits.in_boundary(u.position.lat, u.position.lon):
                     self.sim.remove_unit(i)
                     if i <= self.args.num_agents:
-                        p = -5 if mode == "LowLevel" else -2
+                        p = -50 if mode == "LowLevel" else -20
                         if i in rews: rews[i].append(p * s)
-                        destroyed_ids.append(i);
+                        destroyed_ids.append(i)
                         self.alive_agents -= 1
                     else:
                         self.alive_opps -= 1
@@ -78,49 +84,47 @@ class HHMARLBaseEnv(gymnasium.Env):
         for ev in events:
             if not isinstance(ev, UnitDestroyedEvent): continue
 
-            killer_id = ev.unit_killer.id
-            destroyed_id = ev.unit_destroyed.id
+            if ev.unit_killer.id <= self.args.num_agents and ev.unit_killer.id in rews:
+                if ev.unit_destroyed.id > self.args.num_agents:
 
-            if killer_id <= self.args.num_agents and killer_id in rews:
-                if destroyed_id > self.args.num_agents:  # Agent killed an opponent
-                    self.alive_opps -= 1
+                    ### --- MODIFIED: Add the kill_reward_bonus --- ###
+                    base_kill_reward = 1.0
+                    total_kill_reward = (base_kill_reward + kill_reward_bonus) * s
+
+                    # Original logic for low-level fight mode can add extra bonuses
                     if mode == "LowLevel" and self.agent_mode == "fight":
-                        # Reward for MISSILE kill (based on remaining missiles)
                         if ev.origin.type == "Rocket":
-                            reward = self._shifted_range(ev.unit_killer.missile_remain / ev.unit_killer.rocket_max, 0,
-                                                         1, 1.0, 1.5)
-                            rews[killer_id].append(reward * s)
-                        # Reward for CANNON kill (ammo efficiency + positional advantage)
+                            total_kill_reward += self._shifted_range(
+                                ev.unit_killer.missile_remain / ev.unit_killer.rocket_max, 0, 1, 0, 0.5) * s
                         else:
                             ammo_rew = self._shifted_range(
-                                ev.unit_killer.cannon_remain_secs / ev.unit_killer.cannon_max, 0, 1, 0.5, 1.0)
-                            pos_rew = 0.0
-                            if opp_stats and killer_id in opp_stats:
-                                # opp_stats[killer_id][0] is the advantage angle (high is good)
-                                pos_rew = self._shifted_range(opp_stats[killer_id][0], 0, 1, 0.5, 1.0)
+                                ev.unit_killer.cannon_remain_secs / ev.unit_killer.cannon_max, 0, 1, 0, 0.5)
+                            pos_rew = self._shifted_range(opp_stats.get(ev.unit_killer.id, [0, 0])[0], 0, 1, 0, 0.5)
+                            total_kill_reward += (ammo_rew + pos_rew) * s
 
-                            rews[killer_id].append((ammo_rew + pos_rew) * s)
-                    else:  # High-level or escape mode has simpler reward
-                        rews[killer_id].append(1 * s)
+                    rews[ev.unit_killer.id].append(total_kill_reward)
+                    ### ------------------------------------------- ###
 
-                elif destroyed_id <= self.args.num_agents:  # Friendly kill
-                    self.alive_agents -= 1
-                    rews[killer_id].append(-2 * s)
-
-            elif killer_id > self.args.num_agents:  # Opponent got a kill
-                if destroyed_id <= self.args.num_agents and destroyed_id in rews:  # Opponent killed an agent
-                    self.alive_agents -= 1
-                    p = -2 if mode == "LowLevel" else -1
-                    rews[destroyed_id].append(p * s)
-                    destroyed_ids.append(destroyed_id)
-                elif destroyed_id > self.args.num_agents:  # Opponent friendly kill
                     self.alive_opps -= 1
+                elif ev.unit_destroyed.id <= self.args.num_agents:
+                    rews[ev.unit_killer.id].append(-2 * s)
+                    if self.args.friendly_punish and ev.unit_destroyed.id in rews:
+                        rews[ev.unit_destroyed.id].append(-2 * s)
+                        destroyed_ids.append(ev.unit_destroyed.id)
+                    self.alive_agents -= 1
+
+            elif ev.unit_killer.id > self.args.num_agents:
+                if ev.unit_destroyed.id <= self.args.num_agents and ev.unit_destroyed.id in rews:
+                    p = -2 if mode == "LowLevel" else -1
+                    rews[ev.unit_destroyed.id].append(p * s)
+                    destroyed_ids.append(ev.unit_destroyed.id)
+                    self.alive_agents -= 1
+                elif ev.unit_destroyed.id > self.args.num_agents:
+                    self.alive_opps -= 1
+
         return rews, destroyed_ids
 
-    ### --- END MODIFIED REWARD FUNCTION --- ###
-
-    # --- Utility functions (unchanged, omitted for brevity) ---
-    # ... (All other functions from `env_base.py` are identical to the previous full file)
+    # --- The rest of the file is unchanged. All other utility functions (_nearby_object, _focus_angle, plot, etc.) are the same. ---
     def fight_state_values(self, agent_id, unit, opp, fri_id=None):
         state = []
         x, y = self.map_limits.relative_position(unit.position.lat, unit.position.lon)
@@ -194,32 +198,44 @@ class HHMARLBaseEnv(gymnasium.Env):
         return state
 
     def _take_base_action(self, mode, unit, unit_id, opp_id, actions, rewards=None):
-        if unit_id not in actions: return rewards
+        if unit_id not in actions:
+            return rewards
         act = actions[unit_id]
         unit.set_heading((unit.heading + (act[0] - 6) * 15) % 360)
         unit.set_speed(100 + ((unit.max_speed - 100) / 8) * act[1])
-        if bool(act[2]) and unit.cannon_remain_secs > 0: unit.fire_cannon()
+        if bool(act[2]) and unit.cannon_remain_secs > 0:
+            unit.fire_cannon()
         if unit.ac_type == 1 and len(act) > 3 and bool(act[3]):
             if opp_id and unit.missile_remain > 0 and not unit.actual_missile and self.missile_wait[unit_id] == 0:
                 if self.sim.unit_exists(opp_id):
                     unit.fire_missile(unit, self.sim.get_unit(opp_id), self.sim)
                     rand_wait = self.np_random.integers(7, 18) if mode == "LowLevel" else self.np_random.integers(8, 13)
                     self.missile_wait[unit_id] = rand_wait
-        if self.missile_wait[unit_id] > 0 and not bool(unit.actual_missile): self.missile_wait[unit_id] -= 1
+        if self.missile_wait[unit_id] > 0 and not bool(unit.actual_missile):
+            self.missile_wait[unit_id] -= 1
         return rewards
+
+    def _get_policies(self, mode):
+        pass
+
+    def _policy_actions(self, policy_type, agent_id, unit):
+        return {}
 
     def _nearby_object(self, agent_id, friendly=False):
         order = []
-        id_pool = list(
-            range(1, self.args.num_agents + 1) if agent_id > self.args.num_agents else range(self.args.num_agents + 1,
-                                                                                             self.args.total_num + 1))
         if friendly:
-            id_pool = list(range(1, self.args.num_agents + 1) if agent_id <= self.args.num_agents else range(
-                self.args.num_agents + 1, self.args.total_num + 1))
+            id_pool = list(range(1, self.args.num_agents + 1)) if agent_id <= self.args.num_agents else list(
+                range(self.args.num_agents + 1, self.args.total_num + 1))
+        else:
+            id_pool = list(
+                range(self.args.num_agents + 1, self.args.total_num + 1)) if agent_id <= self.args.num_agents else list(
+                range(1, self.args.num_agents + 1))
         if agent_id in id_pool: id_pool.remove(agent_id)
         for i in id_pool:
             if self.sim.unit_exists(i):
-                order.append([i, self._distance(agent_id, i, True), self._distance(agent_id, i, False)])
+                dist_norm = self._distance(agent_id, i, True)
+                dist_raw = self._distance(agent_id, i, False)
+                order.append([i, dist_norm, dist_raw])
         order.sort(key=lambda x: x[1])
         return order
 
@@ -305,24 +321,6 @@ class HHMARLBaseEnv(gymnasium.Env):
                 else:
                     self.alive_opps += 1
 
-    def plot(self, out_file: Path, paths=True):
-        objects = [StatusMessage(self.sim.status_text or f"Step: {self.steps}"),
-                   TopLeftMessage(self.sim.utc_time.strftime("%H:%M:%S"))]
-        for i in range(1, self.args.total_num + 1):
-            col = 'blue' if i <= self.args.num_agents else 'red'
-            if self.sim.unit_exists(i):
-                objects.extend(self._plot_airplane(self.sim.get_unit(i), col, paths))
-            elif i in self.sim.trace_record_units:
-                objects.extend(self._plot_airplane(None, col, paths, True, i))
-        for i in range(self.args.total_num + 1, self.sim._next_unit_id):
-            if self.sim.unit_exists(i):
-                unit = self.sim.get_unit(i)
-                col = "blue" if unit.source.id <= self.args.num_agents else "red"
-                objects.append(
-                    Missile(unit.position.lat, unit.position.lon, unit.heading, edge_color=colors[f'{col}_outline'],
-                            fill_color=colors[f'{col}_fill'], info_text=f"m_{i}"))
-        self.plotter.to_png(str(out_file), objects)
-
     def _plot_airplane(self, a: Rafale, side: str, path=True, use_backup=False, u_id=0):
         objects = []
         if use_backup:
@@ -346,3 +344,23 @@ class HHMARLBaseEnv(gymnasium.Env):
                                          (a.position.lat, a.position.lon)], dash=(1, 1),
                                         edge_color=colors[f'{side}_outline']))
         return objects
+
+    def plot(self, out_file: Path, paths=True):
+        objects = [
+            StatusMessage(self.sim.status_text or f"Step: {self.steps}"),
+            TopLeftMessage(self.sim.utc_time.strftime("%H:%M:%S"))
+        ]
+        for i in range(1, self.args.total_num + 1):
+            col = 'blue' if i <= self.args.num_agents else 'red'
+            if self.sim.unit_exists(i):
+                objects.extend(self._plot_airplane(self.sim.get_unit(i), col, paths))
+            elif i in self.sim.trace_record_units:
+                objects.extend(self._plot_airplane(None, col, paths, True, i))
+        for i in range(self.args.total_num + 1, self.sim._next_unit_id):
+            if self.sim.unit_exists(i):
+                unit = self.sim.get_unit(i)
+                col = "blue" if unit.source.id <= self.args.num_agents else "red"
+                objects.append(
+                    Missile(unit.position.lat, unit.position.lon, unit.heading, edge_color=colors[f'{col}_outline'],
+                            fill_color=colors[f'{col}_fill'], info_text=f"m_{i}"))
+        self.plotter.to_png(str(out_file), objects)
