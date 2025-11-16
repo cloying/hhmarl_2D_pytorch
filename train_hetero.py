@@ -1,4 +1,4 @@
-# FILE: train_hetero.py (Final and Absolutely Complete Full Code)
+# FILE: train_hetero.py (Final Version with Separated Actor/Critic Updates)
 
 import os
 import time
@@ -19,6 +19,11 @@ from config import Config
 from envs.env_hetero import LowLevelEnv
 from models.ac_models_hetero import Actor, GNN_Critic
 
+# This is an optional but recommended fix for the graph break warnings.
+import torch._dynamo
+
+torch._dynamo.config.capture_scalar_outputs = True
+
 
 def linear_decay(current_step, total_steps, initial_value, final_value):
     if current_step >= total_steps: return final_value
@@ -26,7 +31,6 @@ def linear_decay(current_step, total_steps, initial_value, final_value):
     return initial_value + fraction * (final_value - initial_value)
 
 
-### --- Checkpointing and Rendering Functions --- ###
 def save_checkpoint(actors, critics, actor_optimizers, critic_optimizers, update, base_path):
     checkpoint_dir = Path(base_path) / "checkpoints" / f"update_{update}"
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
@@ -207,14 +211,11 @@ if __name__ == "__main__":
             global_step += num_workers
             for agent_id in agent_ids: obs_buffers[agent_id][step] = next_obs[agent_id]
             done_buffers[step] = next_done
-
             current_shaping_scale = linear_decay(global_step, args.shaping_decay_timesteps, args.shaping_scale_initial,
                                                  args.shaping_scale_final)
-
             with torch.no_grad():
                 actions, logprobs, values = {}, {}, {}
                 obs_tensors = {i: torch.from_numpy(next_obs[i]).to(device) for i in agent_ids}
-
                 for agent_id, obs_tensor in obs_tensors.items():
                     policy_id = policy_map[agent_id]
                     logits = actors[policy_id](obs_tensor)
@@ -224,30 +225,31 @@ if __name__ == "__main__":
                     actions[agent_id] = torch.stack(action_parts, dim=-1)
                     logprobs[agent_id] = torch.sum(torch.stack([d.log_prob(a) for d, a in zip(dists, action_parts)]),
                                                    dim=0)
-
                 graph_data_list = [Data(**next_info["graph_data"][w]) for w in range(num_workers) if
                                    next_info["graph_data"][w] and next_info["graph_data"][w]['x'].nelement() > 0]
                 graph_batch = Batch.from_data_list(graph_data_list).to(device) if graph_data_list else None
-
                 for policy_id in actors.keys():
-                    value = critics[policy_id](graph_batch) if graph_batch else torch.zeros(len(graph_data_list),
-                                                                                            device=device)
+                    value = critics[policy_id](graph_batch) if graph_batch else torch.zeros(
+                        len(graph_data_list) if graph_data_list else 0, device=device)
+                    # Handle potential size mismatch if some envs returned empty graphs
+                    if value.shape[0] != num_workers:
+                        full_value = torch.zeros(num_workers, device=device)
+                        valid_indices = [w for w, g in enumerate(next_info["graph_data"]) if
+                                         g and g['x'].nelement() > 0]
+                        full_value[valid_indices] = value
+                        value = full_value
                     for aid, pid in policy_map.items():
                         if pid == policy_id:
                             values[aid] = value
-
             for agent_id in agent_ids:
                 action_buffers[agent_id][step] = actions[agent_id].cpu().numpy()
                 logprob_buffers[agent_id][step] = logprobs[agent_id].cpu().numpy()
                 value_buffers[agent_id][step] = values[agent_id].cpu().numpy().flatten()
-
             for w in range(num_workers):
                 graph_data_buffer[step][w] = next_info["graph_data"][w]
-
             env_actions = {i: a.cpu().numpy() for i, a in actions.items()}
             next_obs, _, terminateds, truncateds, next_info = vec_env.step(env_actions)
             next_done = np.logical_or(terminateds, truncateds)
-
             for i in range(num_workers):
                 worker_rewards = next_info.get("agent_rewards", [{} for _ in range(num_workers)])[i]
                 shaping_rewards = next_info.get("shaping_rewards", [{} for _ in range(num_workers)])[i]
@@ -257,7 +259,6 @@ if __name__ == "__main__":
                         dense_reward = shaping_rewards.get(agent_id, 0.0)
                         total_reward = sparse_reward + (dense_reward * current_shaping_scale)
                         reward_buffers[agent_id][step, i] = total_reward
-
             if "final_info" in next_info:
                 for info in next_info["final_info"]:
                     if info and "episode" in info:
@@ -270,8 +271,14 @@ if __name__ == "__main__":
             next_graph_batch = Batch.from_data_list(next_graph_data_list).to(device) if next_graph_data_list else None
             next_values = {}
             for policy_id in actors.keys():
-                next_val = critics[policy_id](next_graph_batch).cpu().numpy() if next_graph_batch else np.zeros(
-                    len(next_graph_data_list))
+                next_val_tensor = critics[policy_id](next_graph_batch) if next_graph_batch else torch.zeros(
+                    len(next_graph_data_list), device=device)
+                if next_val_tensor.shape[0] != num_workers:
+                    full_next_val = torch.zeros(num_workers, device=device)
+                    valid_indices = [w for w, g in enumerate(next_info["graph_data"]) if g and g['x'].nelement() > 0]
+                    full_next_val[valid_indices] = next_val_tensor
+                    next_val_tensor = full_next_val
+                next_val = next_val_tensor.cpu().numpy()
                 for aid, pid in policy_map.items():
                     if pid == policy_id:
                         next_values[aid] = next_val
@@ -316,33 +323,38 @@ if __name__ == "__main__":
                     mb_ret = torch.from_numpy(b_returns[main_agent_id][mb_inds]).to(device)
                     mb_logp = torch.from_numpy(b_logprobs[main_agent_id][mb_inds]).to(device)
 
-                    logits = actors[policy_id](mb_obs_own)
-                    new_values = critics[policy_id](mb_graph_batch)
+                    ### --- FIX: SEPARATE FORWARD AND BACKWARD PASSES --- ###
 
+                    # --- Actor Loss Calculation ---
+                    logits = actors[policy_id](mb_obs_own)
                     split_sizes = list(vec_env.single_action_space[main_agent_id].nvec)
                     dists = [torch.distributions.Categorical(logits=l) for l in logits.split(split_sizes, dim=-1)]
                     new_logprobs = torch.sum(torch.stack([d.log_prob(a) for d, a in zip(dists, mb_act_own.T)]), dim=0)
                     entropy = torch.sum(torch.stack([d.entropy() for d in dists]), dim=0)
-
                     logratio = new_logprobs - mb_logp
                     ratio = logratio.exp()
                     norm_adv = (mb_adv - mb_adv.mean()) / (mb_adv.std() + 1e-8)
                     pg_loss1 = -norm_adv * ratio
                     pg_loss2 = -norm_adv * torch.clamp(ratio, 1 - clip_coef, 1 + clip_coef)
                     pg_loss = torch.max(pg_loss1, pg_loss2).mean()
-
-                    v_loss = 0.5 * ((new_values.view(-1) - mb_ret) ** 2).mean()
-
                     actor_loss = pg_loss - ent_coef * entropy.mean()
+
+                    # Actor Update
                     actor_optimizers[policy_id].zero_grad()
-                    actor_loss.backward(retain_graph=True)
+                    actor_loss.backward()
                     nn.utils.clip_grad_norm_(actors[policy_id].parameters(), max_grad_norm)
                     actor_optimizers[policy_id].step()
 
+                    # --- Critic Loss Calculation (Separate Forward Pass) ---
+                    new_values = critics[policy_id](mb_graph_batch)
+                    v_loss = 0.5 * ((new_values.view(-1) - mb_ret) ** 2).mean()
+
+                    # Critic Update
                     critic_optimizers[policy_id].zero_grad()
                     v_loss.backward()
                     nn.utils.clip_grad_norm_(critics[policy_id].parameters(), max_grad_norm)
                     critic_optimizers[policy_id].step()
+                    ### --------------------------------------------------- ###
 
         avg_return = np.mean(episodic_returns) if len(episodic_returns) > 0 else 0.0
         pbar.set_description(f"Update {update}, Avg Return: {avg_return:.2f}, GS: {global_step}")
