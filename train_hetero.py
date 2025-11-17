@@ -23,13 +23,21 @@ from models.ac_models_hetero import GNN_Critic, RecurrentActor
 
 # --- Helper Function for Learning Rate Schedule ---
 def get_learning_rate(global_step, initial_lr, total_timesteps):
-    decay_start_step = 3_000_000
+
+    # Define the decay to start after 75% of the total training timesteps.
+    decay_start_fraction = 0.75
+    decay_start_step = total_timesteps * decay_start_fraction
+
     if global_step < decay_start_step:
         return initial_lr
     else:
-        remaining_steps = total_timesteps - decay_start_step
-        decay_progress = max(0.0, (global_step - decay_start_step) / remaining_steps)
-        return initial_lr * (1 - decay_progress)
+        # Calculate the number of steps over which the decay will occur.
+        decay_duration = total_timesteps - decay_start_step
+        # Calculate how far into the decay period we are.
+        steps_into_decay = global_step - decay_start_step
+        decay_progress = max(0.0, steps_into_decay / decay_duration)
+
+        return initial_lr * (1.0 - decay_progress)
 
 
 # --- Other Helper Functions (Unchanged) ---
@@ -98,7 +106,6 @@ def load_checkpoint(actors, critics, actor_optimizers, critic_optimizers, path, 
 # --- Main Training Script ---
 if __name__ == "__main__":
     args = Config(0).get_arguments
-    args.total_timesteps = 4_000_000
     seed = args.seed
     random.seed(seed);
     np.random.seed(seed);
@@ -136,7 +143,7 @@ if __name__ == "__main__":
             actor = RecurrentActor(obs_dim_own=obs_space[own_id].shape[0],
                                    actor_logits_dim=int(np.sum(act_space[own_id].nvec))).to(device)
             critic = GNN_Critic().to(device)
-            actors[policy_id] = actor;
+            actors[policy_id] = actor
             critics[policy_id] = critic
             actor_optimizers[policy_id] = optim.Adam(actor.parameters(), lr=initial_learning_rate, eps=1e-5)
             critic_optimizers[policy_id] = optim.Adam(critic.parameters(), lr=initial_learning_rate, eps=1e-5)

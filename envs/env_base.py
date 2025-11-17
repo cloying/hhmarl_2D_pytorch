@@ -88,7 +88,7 @@ class HHMARLBaseEnv(gymnasium.Env):
                 if ev.unit_destroyed.id > self.args.num_agents:
 
                     ### --- MODIFIED: Add the kill_reward_bonus --- ###
-                    base_kill_reward = 1.0
+                    base_kill_reward = 2.0
                     total_kill_reward = (base_kill_reward + kill_reward_bonus) * s
 
                     # Original logic for low-level fight mode can add extra bonuses

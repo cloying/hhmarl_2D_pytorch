@@ -37,7 +37,7 @@ class Config(object):
         parser.add_argument('--total_timesteps', type=int, default=4_000_000, help='Total timesteps for the training run.')
         parser.add_argument('--learning_rate', type=float, default=1e-4, help='Learning rate for the Adam optimizer.')
         parser.add_argument('--map_size', type=float, default=0.3 if mode == 0 else 0.5, help='Map size in km (value * 100)')
-        parser.add_argument('--ent_coef', type=float, default=0.01, help='Entropy coefficient for PPO loss.')
+        parser.add_argument('--ent_coef', type=float, default=0.015, help='Entropy coefficient for PPO loss.')
         parser.add_argument('--checkpoint_interval', type=int, default=15, help='Save a model checkpoint every N updates.')
         parser.add_argument('--render_interval', type=int, default=15, help='Render a GIF every N updates.')
         # --- Reward Shaping ---

@@ -1,11 +1,11 @@
-# FILE: envs/env_hetero.py (Corrected with dtype=torch.float32)
+# FILE: envs/env_hetero.py (Modified Tail Chase Reward & Edge Features)
 
 import numpy as np
 import gymnasium
 import torch
 import os
 from .env_base import HHMARLBaseEnv
-from models.ac_models_hetero import RecurrentActor, NODE_FEATURE_DIM
+from models.ac_models_hetero import RecurrentActor, NODE_FEATURE_DIM, EDGE_FEATURE_DIM
 
 # Constants
 OBS_AC1, OBS_AC2 = 26, 24
@@ -120,41 +120,75 @@ class LowLevelEnv(HHMARLBaseEnv):
         return actions
 
     def _hardcoded_opp_logic(self, unit, unit_id):
-        if self.global_step < 800_000:
-            unit.set_speed(0);
+        """
+        Controls the opponent's behavior based on curriculum learning phases
+        determined by the percentage of total training completed.
+        """
+        # Calculate the current training progress as a ratio from 0.0 to 1.0
+        training_progress = self.global_step / self.args.total_timesteps
+
+        # --- Phase 1: Static Opponent (First 20% of training) ---
+        if training_progress < 0.2:
+            unit.set_speed(0)
             return
-        elif self.global_step < 2_500_000:
-            progress = (self.global_step - 800_000) / (1_700_000)
+
+        # --- Phase 2: Ramping Up Opponent (20% to 60% of training) ---
+        elif training_progress < 0.6:
+            # Calculate the progress *within* this phase (from 0.0 to 1.0)
+            # to smoothly ramp up the opponent's abilities.
+            phase_2_progress = (training_progress - 0.2) / 0.4
+
             d_agt = self._nearby_object(unit_id)
             if not d_agt or not self.sim.unit_exists(d_agt[0][0]):
+                # If no target, move around randomly based on phase progress
                 if self.steps % 20 == 0:
-                    unit.set_speed(self.np_random.uniform(0, unit.max_speed * 0.5 * progress))
-                    unit.set_heading((unit.heading + self.np_random.uniform(-90 * progress, 90 * progress)) % 360)
+                    unit.set_speed(self.np_random.uniform(0, unit.max_speed * 0.5 * phase_2_progress))
+                    unit.set_heading(
+                        (unit.heading + self.np_random.uniform(-90 * phase_2_progress, 90 * phase_2_progress)) % 360)
                 return
+
+            # If a target exists, engage it with scaled-down effectiveness
             target_agent = self.sim.get_unit(d_agt[0][0])
-            bearing = self._focus_angle(unit_id, target_agent.id, norm=False);
+            bearing = self._focus_angle(unit_id, target_agent.id, norm=False)
             sign = self._correct_angle_sign(unit, target_agent)
-            turn = np.clip(bearing * sign, -15, 15) * progress
+
+            # Turn rate and speed are scaled by phase progress
+            turn = np.clip(bearing * sign, -15, 15) * phase_2_progress
             unit.set_heading((unit.heading + turn) % 360)
+
             speed_multiplier = 0.8 if d_agt[0][1] > 0.1 else 0.5
-            unit.set_speed(unit.max_speed * speed_multiplier * progress)
-            if d_agt[0][1] < 0.05 and bearing < 10 and self.np_random.random() < (0.5 * progress): unit.fire_cannon()
+            unit.set_speed(unit.max_speed * speed_multiplier * phase_2_progress)
+
+            # Firing probability is also scaled by phase progress
+            if d_agt[0][1] < 0.05 and bearing < 10 and self.np_random.random() < (0.5 * phase_2_progress):
+                unit.fire_cannon()
+
+        # --- Phase 3: Full-Strength Opponent (After 60% of training) ---
         else:
             d_agt = self._nearby_object(unit_id)
-            if not d_agt or not self.sim.unit_exists(d_agt[0][0]): return
+            if not d_agt or not self.sim.unit_exists(d_agt[0][0]):
+                return
+
+            # Engage the target with full deterministic logic
             target_agent = self.sim.get_unit(d_agt[0][0])
-            bearing = self._focus_angle(unit_id, target_agent.id, norm=False);
+            bearing = self._focus_angle(unit_id, target_agent.id, norm=False)
             sign = self._correct_angle_sign(unit, target_agent)
+
             turn = np.clip(bearing * sign, -15, 15)
             unit.set_heading((unit.heading + turn) % 360)
+
             if d_agt[0][1] > 0.1:
                 unit.set_speed(unit.max_speed * 0.8)
             else:
                 unit.set_speed(unit.max_speed * 0.5)
-            if d_agt[0][1] < 0.05 and bearing < 10: unit.fire_cannon()
+
+            if d_agt[0][1] < 0.05 and bearing < 10:
+                unit.fire_cannon()
 
     def _get_graph_state(self):
-        active_units, node_features = [], []
+        ### --- MODIFICATION START: Add Edge Features to Graph --- ###
+        active_units, node_features, edge_index, edge_features = [], [], [], []
+
         for unit_id in range(1, self.args.total_num + 1):
             if self.sim.unit_exists(unit_id):
                 active_units.append(unit_id)
@@ -168,19 +202,41 @@ class LowLevelEnv(HHMARLBaseEnv):
                             1.0 if unit.cannon_current_burst_secs > 0 else 0.0,
                             1.0 if unit.ac_type == 1 else 0.0] + team_id
                 node_features.append(features)
+
         if not node_features:
             return {"x": torch.empty((0, NODE_FEATURE_DIM), dtype=torch.float32),
-                    "edge_index": torch.empty((2, 0), dtype=torch.long)}
+                    "edge_index": torch.empty((2, 0), dtype=torch.long),
+                    "edge_attr": torch.empty((0, EDGE_FEATURE_DIM), dtype=torch.float32)}
 
         num_nodes = len(active_units)
-        edge_index = [[i, j] for i in range(num_nodes) for j in range(num_nodes) if i != j]
+        for i in range(num_nodes):
+            for j in range(num_nodes):
+                if i == j: continue
 
-        ### --- FIX: Explicitly set dtype to float32 --- ###
+                # Get simulator IDs for the source and target nodes
+                source_id = active_units[i]
+                target_id = active_units[j]
+
+                source_unit = self.sim.get_unit(source_id)
+                target_unit = self.sim.get_unit(target_id)
+
+                # Calculate the 6 edge features
+                focus_angle = self._focus_angle(source_id, target_id, norm=True)
+                aspect_angle = self._aspect_angle(target_id, source_id, norm=True)
+                heading_diff = self._heading_diff(source_id, target_id, norm=True)
+                distance = self._distance(source_id, target_id, norm=True)
+                is_firing = 1.0 if target_unit.cannon_current_burst_secs > 0 else 0.0
+                is_enemy = 1.0 if source_unit.group != target_unit.group else 0.0
+
+                edge_index.append([i, j])
+                edge_features.append([focus_angle, aspect_angle, heading_diff, distance, is_firing, is_enemy])
+
         return {
             "x": torch.tensor(node_features, dtype=torch.float32),
-            "edge_index": torch.tensor(edge_index, dtype=torch.long).t().contiguous()
+            "edge_index": torch.tensor(edge_index, dtype=torch.long).t().contiguous(),
+            "edge_attr": torch.tensor(edge_features, dtype=torch.float32)
         }
-        ### ---------------------------------------------- ###
+        ### --- MODIFICATION END --- ###
 
     def state(self, for_opponent_id=None):
         state_dict = {}
@@ -224,7 +280,6 @@ class LowLevelEnv(HHMARLBaseEnv):
             if not self.sim.unit_exists(i):
                 continue
 
-            # Basic time penalty to encourage efficiency
             shaping_rewards[i] += time_penalty
 
             opps = self._nearby_object(i)
@@ -235,35 +290,39 @@ class LowLevelEnv(HHMARLBaseEnv):
             agent_unit = self.sim.get_unit(i)
             opponent_unit = self.sim.get_unit(closest_opp_id)
 
-            # --- Calculate Key Tactical Angles (using non-normalized degrees for clarity) ---
-            agent_focus_angle_deg = self._focus_angle(i, closest_opp_id, norm=False)
-            opponent_aspect_angle_deg = self._aspect_angle(closest_opp_id, i, norm=False)
+            ### --- MODIFICATION START: Continuous "Tail Chase" Bonus --- ###
+            # 1. Calculate the three components for the reward
+            agent_focus_norm = self._focus_angle(i, closest_opp_id, norm=True)
+            opponent_aspect_norm = self._aspect_angle(closest_opp_id, i, norm=True)
 
-            # --- Proposal 1: "Tail Chase" Bonus ---
-            # Condition: Agent is pointing at the opponent (focus < 20 deg) AND
-            #            is in the opponent's rear hemisphere (aspect < 30 deg).
-            is_in_tail_chase = agent_focus_angle_deg < 20 and opponent_aspect_angle_deg < 30
-            if is_in_tail_chase:
-                shaping_rewards[i] += self.args.tail_chase_bonus
+            # Use a Gaussian function for an optimal distance reward
+            ideal_dist = 0.07  # Corresponds to ~2-3 km, good cannon range
+            std_dev = 0.05  # How quickly the reward falls off
+            distance_reward = np.exp(-0.5 * ((closest_opp_dist_norm - ideal_dist) / std_dev) ** 2)
 
-            # --- Proposal 3: "Energy Advantage" Bonus ---
+            # Use an exponential decay for angle rewards (high reward when angle is near zero)
+            focus_reward = np.exp(-5 * agent_focus_norm)
+            aspect_reward = np.exp(-5 * opponent_aspect_norm)
+
+            # Combine them: The agent must satisfy all three conditions to get a high reward.
+            tail_chase_reward = focus_reward * aspect_reward * distance_reward
+            shaping_rewards[i] += self.args.tail_chase_bonus * tail_chase_reward
+            ### --- MODIFICATION END --- ###
+
             if agent_unit.speed > opponent_unit.speed:
                 shaping_rewards[i] += self.args.energy_advantage_bonus
 
-            # --- Proposal 2: "High-Probability Kill" Reward ---
             agent_action = actions.get(i)
-            if agent_action is not None and (agent_action[2] == 1 or (len(agent_action) > 3 and agent_action[3] == 1)):
-                is_firing = True
-            else:
-                is_firing = False
+            is_firing = agent_action is not None and (
+                        agent_action[2] == 1 or (len(agent_action) > 3 and agent_action[3] == 1))
 
             if is_firing:
-                # Condition for a "good shot": Firing while in a tail chase at close range.
-                is_good_shot = is_in_tail_chase and closest_opp_dist_norm < 0.2
+                # A "good shot" is one taken during a good tail chase.
+                # We use a threshold on the combined reward.
+                is_good_shot = tail_chase_reward > 0.5
                 if is_good_shot:
                     shaping_rewards[i] += self.args.high_prob_kill_reward
                 else:
-                    # Penalize wasteful shots
                     shaping_rewards[i] += self.args.ammo_penalty
 
         return shaping_rewards
