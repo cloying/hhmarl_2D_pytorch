@@ -159,49 +159,57 @@ class LowLevelEnv(HHMARLBaseEnv):
 
     def _get_shaping_rewards(self, actions):
         shaping_rewards = {i: 0.0 for i in self._agent_ids}
-        time_penalty = -0.0005
+        time_penalty = -0.001  # A small penalty for every step to encourage efficiency
+
         for i in self._agent_ids:
             if self.sim.unit_exists(i):
-                unit = self.sim.get_unit(i)
                 shaping_rewards[i] += time_penalty
-                shaping_rewards[i] += (unit.speed / unit.max_speed) * 0.001
+
                 opps = self._nearby_object(i)
                 if not opps:
-                    center_lat, center_lon = self.map_limits.absolute_position(0.5, 0.5)
-                    current_dist_to_center = np.hypot(unit.position.lat - center_lat, unit.position.lon - center_lon)
-                    prev_dist = self.previous_dist_to_center.get(i, current_dist_to_center)
-                    progress_reward = (prev_dist - current_dist_to_center) * 0.1
-                    shaping_rewards[i] += progress_reward
-                    self.previous_dist_to_center[i] = current_dist_to_center
                     continue
+
                 closest_opp_id, closest_opp_dist_norm, _ = opps[0]
+
                 if self.agent_mode == 'fight':
-                    aspect_angle = self._aspect_angle(closest_opp_id, i, norm=True)
-                    position_reward = (aspect_angle - 0.5) * 0.01
-                    dist_reward = np.exp(-((closest_opp_dist_norm - 0.1) ** 2) / 0.05) * 0.01
-                    shaping_rewards[i] += position_reward + dist_reward
+                    # REWARD 1: Simple reward for getting closer
+                    # (You would need to store previous distance to calculate this)
+                    # For now, let's use a simpler proxy:
+                    progress_reward = (1.0 - closest_opp_dist_norm) * 0.005
+                    shaping_rewards[i] += progress_reward
+
+                    # REWARD 2: Reward for firing under good conditions
                     agent_action = actions.get(i)
-                    if agent_action is not None and agent_action[2] == 1:
+                    if agent_action is not None and (
+                            agent_action[2] == 1 or (len(agent_action) > 3 and agent_action[3] == 1)):
                         focus_angle_norm = self._focus_angle(i, closest_opp_id, norm=True)
+                        # Condition: Pointing at enemy and reasonably close
                         if focus_angle_norm < 0.1 and closest_opp_dist_norm < 0.3:
                             shaping_rewards[i] += self.args.firing_reward
                         else:
                             shaping_rewards[i] += self.args.ammo_penalty
-                elif self.agent_mode == 'escape':
-                    aspect_angle_of_opp = self._aspect_angle(i, closest_opp_id, norm=True)
-                    threat_level = (1.0 - closest_opp_dist_norm) * aspect_angle_of_opp
-                    escape_penalty = -threat_level * 0.02
-                    shaping_rewards[i] += escape_penalty
+
         return shaping_rewards
 
     def _hardcoded_opp_logic(self, unit, unit_id):
         if self.args.level == 1:
-            return
+            return  # Static opponent
+
         elif self.args.level == 2:
+            # Fire cannon periodically to apply pressure
+            if self.steps % 10 == 0:
+                unit.fire_cannon()
+
+            # Make a sharp, random turn at intervals
             if self.steps % self.np_random.integers(35, 46) == 0:
-                unit.set_heading(self.np_random.uniform(0, 360))
-                unit.set_speed(self.np_random.uniform(100, unit.max_speed))
+                direction = 1 if self.np_random.random() < 0.5 else -1
+                turn_angle = 90
+                unit.set_heading((unit.heading + direction * turn_angle) % 360)
+                unit.set_speed(self.np_random.uniform(100, unit.max_speed * 0.8))
+            return
+
         elif self.args.level >= 3:
+            # Your existing logic for Level 3+
             d_agt = self._nearby_object(unit_id)
             if not d_agt or not self.sim.unit_exists(d_agt[0][0]): return
             target_agent = self.sim.get_unit(d_agt[0][0])

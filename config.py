@@ -1,4 +1,4 @@
-# FILE: config.py (Corrected with --ent_coef argument)
+# FILE: config.py (With --seed Argument)
 
 import argparse
 import os
@@ -7,7 +7,6 @@ import os
 class Config(object):
     def __init__(self, mode: int):
         self.mode = mode
-
         parser = argparse.ArgumentParser(description='HHMARL2D Training Config')
 
         # --- Training & Curriculum ---
@@ -18,6 +17,10 @@ class Config(object):
         parser.add_argument('--num_agents', type=int, default=2 if mode == 0 else 3, help='Number of trainable agents')
         parser.add_argument('--num_opps', type=int, default=2 if mode == 0 else 3, help='Number of opponents')
 
+        ### --- NEW: Seed Argument for Reproducibility --- ###
+        parser.add_argument('--seed', type=int, default=42, help='Random seed for reproducibility.')
+        ### ----------------------------------------------- ###
+
         # --- Environment & General Training Parameters ---
         parser.add_argument('--eval', type=bool, default=True, help='Enable evaluation mode during training')
         parser.add_argument('--render', type=bool, default=False, help='Render the scene and save images')
@@ -25,10 +28,13 @@ class Config(object):
                             help='Restore training from a saved model checkpoint')
         parser.add_argument('--restore_path', type=str, default=None,
                             help='Full path to the model checkpoint to restore')
+        parser.add_argument('--reset_optimizers', action='store_true',
+                            help='If restoring a model, force the optimizers to be reset.')
 
         # --- Hardware & Parallelization ---
         parser.add_argument('--gpu', type=float, default=1, help='Set to 1 to use GPU, 0 for CPU')
-        parser.add_argument('--num_workers', type=int, default=6, help='Number of parallel workers for data collection')
+        parser.add_argument('--num_workers', type=int, default=10,
+                            help='Number of parallel workers for data collection')
 
         # --- Algorithm Hyperparameters ---
         parser.add_argument('--total_timesteps', type=int, default=2_000_000,
@@ -36,16 +42,14 @@ class Config(object):
         parser.add_argument('--learning_rate', type=float, default=1e-4, help='Learning rate for the Adam optimizer.')
         parser.add_argument('--map_size', type=float, default=0.3 if mode == 0 else 0.5,
                             help='Map size in km (value * 100)')
-
-        ### --- NEW: Added the missing entropy coefficient argument --- ###
-        parser.add_argument('--ent_coef', type=float, default=0.01, help='Entropy coefficient for PPO loss.')
-        ### ----------------------------------------------------------- ###
+        parser.add_argument('--ent_coef', type=float, default=0.02, help='Entropy coefficient for PPO loss.')
 
         # --- Checkpointing and Rendering ---
         parser.add_argument('--checkpoint_interval', type=int, default=20,
                             help='Save a model checkpoint every N updates.')
         parser.add_argument('--render_interval', type=int, default=20, help='Render a GIF every N updates.')
 
+        # ... (Rest of the file is unchanged)
         # --- Reward Shaping ---
         parser.add_argument('--glob_frac', type=float, default=0.2, help='Fraction of reward sharing between agents')
         parser.add_argument('--rew_scale', type=int, default=1, help='Global reward scaling factor for sparse rewards')
@@ -85,25 +89,25 @@ class Config(object):
         self.set_metrics()
 
     def set_metrics(self):
-        # This function is unchanged from the last correct version.
+        # This function is unchanged from the last working version.
         if self.mode == 0:
             log_name = f'L{self.args.level}_{self.args.agent_mode}_{self.args.num_agents}-vs-{self.args.num_opps}'
         else:
             log_name = f'Commander_{self.args.num_agents}_vs_{self.args.num_opps}'
         self.args.log_path = os.path.join(os.path.dirname(__file__), 'results', log_name)
+        if not self.args.restore:
+            current_level_path = self.args.log_path
+            if os.path.exists(os.path.join(current_level_path, "checkpoints")):
+                self.args.restore, self.args.restore_path = True, current_level_path
         if not self.args.restore and self.mode == 0 and self.args.level > 1:
             prev_level_path = os.path.join(os.path.dirname(__file__), 'results',
                                            f'L{self.args.level - 1}_{self.args.agent_mode}_{self.args.num_agents}-vs-{self.args.num_opps}')
             if os.path.exists(prev_level_path):
-                print(f"Found previous level checkpoint directory at {prev_level_path}. Setting restore=True.")
-                self.args.restore = True
-                self.args.restore_path = prev_level_path
+                self.args.restore, self.args.restore_path = True, prev_level_path
         horizon_level = {1: 150, 2: 200, 3: 300, 4: 350, 5: 400}
         self.args.horizon = horizon_level.get(self.args.level, 500)
-        if self.args.shaping_decay_timesteps is None:
-            self.args.shaping_decay_timesteps = self.args.total_timesteps // 2
-        self.args.total_num = self.args.num_agents + self.args.num_opps
-        self.args.env_config = {"args": self.args}
+        if self.args.shaping_decay_timesteps is None: self.args.shaping_decay_timesteps = self.args.total_timesteps // 2
+        self.args.total_num, self.args.env_config = self.args.num_agents + self.args.num_opps, {"args": self.args}
 
     @property
     def get_arguments(self):
