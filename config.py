@@ -18,7 +18,7 @@ class Config(object):
         # --- Multi-Agent Configuration ---
         parser.add_argument('--num_agents', type=int, default=2 if mode == 0 else 3, help='Number of trainable agents')
         parser.add_argument('--num_opps', type=int, default=2 if mode == 0 else 3, help='Number of opponents')
-        parser.add_argument('--seed', type=int, default=42, help='Random seed for reproducibility.')
+        parser.add_argument('--seed', type=int, default=142, help='Random seed for reproducibility.')
 
         # --- Environment & General Training Parameters ---
         parser.add_argument('--eval', type=bool, default=True, help='Enable evaluation mode during training')
@@ -34,27 +34,27 @@ class Config(object):
         ### ----------------------------------------------- ###
 
         # --- Algorithm Hyperparameters ---
-        parser.add_argument('--total_timesteps', type=int, default=4_000_000, help='Total timesteps for the training run.')
+        parser.add_argument('--total_timesteps', type=int, default=3_000_000, help='Total timesteps for the training run.')
         parser.add_argument('--learning_rate', type=float, default=1e-4, help='Learning rate for the Adam optimizer.')
         parser.add_argument('--map_size', type=float, default=0.3 if mode == 0 else 0.5, help='Map size in km (value * 100)')
         parser.add_argument('--ent_coef', type=float, default=0.015, help='Entropy coefficient for PPO loss.')
         parser.add_argument('--checkpoint_interval', type=int, default=15, help='Save a model checkpoint every N updates.')
         parser.add_argument('--render_interval', type=int, default=15, help='Render a GIF every N updates.')
         # --- Reward Shaping ---
-        parser.add_argument('--glob_frac', type=float, default=0.2, help='Fraction of reward sharing between agents')
+        parser.add_argument('--glob_frac', type=float, default=0.1, help='Fraction of reward sharing between agents')
         parser.add_argument('--rew_scale', type=int, default=1, help='Global reward scaling factor for sparse rewards')
         parser.add_argument('--friendly_kill', type=bool, default=True, help='Whether friendly fire is possible')
         parser.add_argument('--friendly_punish', type=bool, default=False,
                             help='If friendly fire occurs, punish both agents')
         parser.add_argument('--kill_reward_bonus', type=float, default=3.0,
                             help='Additional sparse reward for destroying an enemy.')
-        parser.add_argument('--firing_reward', type=float, default=0.0,
+        parser.add_argument('--firing_reward', type=float, default=0.02,
                             help='DEPRECATED: Use high_prob_kill_reward instead.')
         parser.add_argument('--ammo_penalty', type=float, default=-0.01,
                             help='Dense penalty for firing under bad conditions.')
 
         ### --- NEW: Tactical Reward Shaping Arguments --- ###
-        parser.add_argument('--tail_chase_bonus', type=float, default=0.04,
+        parser.add_argument('--tail_chase_bonus', type=float, default=0.05,
                             help='Dense reward for maintaining a position behind the opponent.')
         parser.add_argument('--high_prob_kill_reward', type=float, default=0.9,
                             help='Dense reward for firing from an advantageous position.')
