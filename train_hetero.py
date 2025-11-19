@@ -1,4 +1,4 @@
-# FILE: train_hetero.py (Corrected Hidden State Dtype)
+# FILE: train_hetero.py (Corrected with Entropy Scheduling)
 
 import os
 import time
@@ -23,24 +23,26 @@ from models.ac_models_hetero import GNN_Critic, RecurrentActor
 
 # --- Helper Function for Learning Rate Schedule ---
 def get_learning_rate(global_step, initial_lr, total_timesteps):
-
-    # Define the decay to start after 75% of the total training timesteps.
+    # (This function is unchanged)
     decay_start_fraction = 0.75
     decay_start_step = total_timesteps * decay_start_fraction
-
     if global_step < decay_start_step:
         return initial_lr
     else:
-        # Calculate the number of steps over which the decay will occur.
         decay_duration = total_timesteps - decay_start_step
-        # Calculate how far into the decay period we are.
         steps_into_decay = global_step - decay_start_step
         decay_progress = max(0.0, steps_into_decay / decay_duration)
-
         return initial_lr * (1.0 - decay_progress)
 
 
-# --- Other Helper Functions (Unchanged) ---
+### --- NEW: Helper Function for Entropy Schedule --- ###
+def get_entropy_coef(global_step, initial_ent, final_ent, total_timesteps):
+    """Linearly decays the entropy coefficient over the entire training run."""
+    progress = np.clip(global_step / total_timesteps, 0.0, 1.0)
+    return initial_ent + progress * (final_ent - initial_ent)
+
+
+# --- Other Helper Functions (evaluate_and_render_episode, etc. are unchanged) ---
 def save_checkpoint(actors, critics, actor_optimizers, critic_optimizers, update, base_path):
     checkpoint_dir = Path(base_path) / "checkpoints" / f"update_{update}"
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
@@ -106,29 +108,31 @@ def load_checkpoint(actors, critics, actor_optimizers, critic_optimizers, path, 
 # --- Main Training Script ---
 if __name__ == "__main__":
     args = Config(0).get_arguments
-    seed = args.seed
+    # (Hyperparameter setup is unchanged)
+    seed = args.seed;
     random.seed(seed);
     np.random.seed(seed);
     torch.manual_seed(seed)
     torch.backends.cudnn.deterministic = True
-    initial_learning_rate = args.learning_rate;
+    initial_learning_rate = args.learning_rate
     num_steps = 2048;
     num_update_epochs = 10;
     num_mini_batches = 32
     gamma = 0.99;
     gae_lambda = 0.95;
-    clip_coef = 0.2;
-    ent_coef = args.ent_coef;
+    clip_coef = 0.2
+    initial_ent_coef = args.ent_coef  # Use the initial value from config
     vf_coef = 0.5;
     max_grad_norm = 0.5
-    num_workers = args.num_workers
-    batch_size = int(num_steps * num_workers);
+    num_workers = args.num_workers;
+    batch_size = int(num_steps * num_workers)
     mini_batch_size = batch_size // num_mini_batches
     num_updates = args.total_timesteps // batch_size
     device = torch.device("cuda" if torch.cuda.is_available() and args.gpu > 0 else "cpu")
-    run_name = f"Continuous_Fight_2v2_{int(time.time())}"
-    writer = SummaryWriter(f"runs/{run_name}")
-    print(f"--- Training on {device} with {num_workers} workers | Run: {run_name} ---")
+    writer = SummaryWriter(args.log_path)
+    print(f"--- Training on {device} with {num_workers} workers | Logging to: {args.log_path} ---")
+
+    # (Environment and model setup is unchanged)
     vec_env = gym.vector.SyncVectorEnv([lambda: LowLevelEnv(args.env_config) for _ in range(num_workers)])
     agent_ids = sorted(list(vec_env.single_observation_space.keys()))
     actors, critics, actor_optimizers, critic_optimizers, policy_map = {}, {}, {}, {}, {}
@@ -143,10 +147,11 @@ if __name__ == "__main__":
             actor = RecurrentActor(obs_dim_own=obs_space[own_id].shape[0],
                                    actor_logits_dim=int(np.sum(act_space[own_id].nvec))).to(device)
             critic = GNN_Critic().to(device)
-            actors[policy_id] = actor
-            critics[policy_id] = critic
+            actors[policy_id], critics[policy_id] = actor, critic
             actor_optimizers[policy_id] = optim.Adam(actor.parameters(), lr=initial_learning_rate, eps=1e-5)
             critic_optimizers[policy_id] = optim.Adam(critic.parameters(), lr=initial_learning_rate, eps=1e-5)
+
+    # (Checkpoint loading is unchanged)
     start_update = 1
     if args.restore and args.restore_path:
         latest_checkpoint, latest_update = find_latest_checkpoint(args.restore_path)
@@ -155,6 +160,8 @@ if __name__ == "__main__":
             load_checkpoint(actors, critics, actor_optimizers, critic_optimizers, latest_checkpoint, device,
                             should_restore_optimizers)
             if should_restore_optimizers: start_update = latest_update + 1
+
+    # (Buffer initialization is unchanged)
     obs_buffers = {i: np.zeros((num_steps, num_workers, *vec_env.single_observation_space[i].shape)) for i in agent_ids}
     action_buffers = {i: np.zeros((num_steps, num_workers, len(vec_env.single_action_space[i].nvec))) for i in
                       agent_ids}
@@ -164,6 +171,8 @@ if __name__ == "__main__":
     done_buffers = np.zeros((num_steps, num_workers))
     graph_data_buffer = [[None for _ in range(num_workers)] for _ in range(num_steps)]
     actor_hidden_buffers = {pid: np.zeros((num_steps, num_workers, actors[pid].hidden_size)) for pid in actors.keys()}
+
+    # (Training loop start is unchanged)
     global_step = (start_update - 1) * batch_size
     next_obs, next_info = vec_env.reset(seed=seed)
     next_done = torch.zeros(num_workers, device=device)
@@ -173,11 +182,18 @@ if __name__ == "__main__":
     print("--- STARTING TRAINING ---")
     pbar = tqdm.trange(start_update, num_updates + 1)
     for update in pbar:
+        # --- MODIFICATION: Calculate new LR and Entropy Coef for this update ---
         new_lr = get_learning_rate(global_step, initial_learning_rate, args.total_timesteps)
+        ent_coef = get_entropy_coef(global_step, initial_ent_coef, args.ent_coef_final,
+                                    args.total_timesteps) if args.use_entropy_schedule else initial_ent_coef
+
         for optim_group in [actor_optimizers, critic_optimizers]:
             for optim in optim_group.values():
                 for param_group in optim.param_groups: param_group['lr'] = new_lr
+
         vec_env.call("set_global_step", global_step)
+
+        # (Rollout phase is unchanged)
         for step in range(num_steps):
             global_step += num_workers;
             obs_tensors = {i: torch.from_numpy(next_obs[i]).float().to(device) for i in agent_ids}
@@ -222,6 +238,8 @@ if __name__ == "__main__":
                     if info and "episode" in info: episodic_returns.append(info["episode"]["r"]); writer.add_scalar(
                         "charts/raw_episodic_return", info["episode"]["r"], global_step)
             for pid in next_actor_hiddens: next_actor_hiddens[pid] *= (1.0 - next_done.float()).view(1, -1, 1)
+
+        # (Advantage calculation is unchanged)
         with torch.no_grad():
             next_values = {}
             next_graph_batch = Batch.from_data_list([Data(**g) for g in next_info["graph_data"] if g]).to(device)
@@ -239,12 +257,16 @@ if __name__ == "__main__":
                 delta = reward_buffers[agent_id][t] + gamma * nextvals * nextnonterminal - value_buffers[agent_id][t]
                 advantages[agent_id][t] = last_gae_lam = delta + gamma * gae_lambda * nextnonterminal * last_gae_lam
             returns[agent_id] = advantages[agent_id] + value_buffers[agent_id]
+
+        # (Batch preparation is unchanged)
         b_obs = {i: obs_buffers[i].reshape((-1, *vec_env.single_observation_space[i].shape)) for i in agent_ids};
         b_actions = {i: action_buffers[i].reshape((-1, len(vec_env.single_action_space[i].nvec))) for i in agent_ids}
         b_logprobs = {i: logprob_buffers[i].reshape(-1) for i in agent_ids};
         b_advantages = {i: advantages[i].reshape(-1) for i in agent_ids};
         b_returns = {i: returns[i].reshape(-1) for i in agent_ids}
         b_graph_data = [g for step_graphs in graph_data_buffer for g in step_graphs if g]
+
+        # --- MODIFICATION: The `ent_coef` used in the loss is now the scheduled value ---
         for epoch in range(num_update_epochs):
             inds = np.random.permutation(batch_size)
             for start in range(0, batch_size, mini_batch_size):
@@ -265,14 +287,9 @@ if __name__ == "__main__":
                     mb_act_own = torch.from_numpy(b_actions[main_agent_id][mb_inds]).to(device)
                     mb_adv = torch.from_numpy(b_advantages[main_agent_id][mb_inds]).to(device)
                     mb_logp = torch.from_numpy(b_logprobs[main_agent_id][mb_inds]).to(device)
-                    h_start = mb_inds // num_workers;
-                    h_worker = mb_inds % num_workers
-
-                    ### --- FIX: Explicitly cast hidden state tensor to float() --- ###
+                    h_start, h_worker = mb_inds // num_workers, mb_inds % num_workers
                     mb_hiddens = torch.from_numpy(actor_hidden_buffers[policy_id][h_start, h_worker]).float().unsqueeze(
                         0).to(device)
-                    ### ----------------------------------------------------------- ###
-
                     logits, _ = actors[policy_id](mb_obs_own, mb_hiddens)
                     dists = [torch.distributions.Categorical(logits=l) for l in
                              logits.split(list(vec_env.single_action_space[main_agent_id].nvec), dim=-1)]
@@ -282,16 +299,23 @@ if __name__ == "__main__":
                     norm_adv = (mb_adv - mb_adv.mean()) / (mb_adv.std() + 1e-8)
                     pg_loss1 = -norm_adv * ratio;
                     pg_loss2 = -norm_adv * torch.clamp(ratio, 1 - clip_coef, 1 + clip_coef)
+                    # The `ent_coef` variable here is the new scheduled value
                     actor_loss = torch.max(pg_loss1, pg_loss2).mean() - ent_coef * entropy.mean()
                     actor_optimizers[policy_id].zero_grad();
                     actor_loss.backward();
                     nn.utils.clip_grad_norm_(actors[policy_id].parameters(), max_grad_norm);
                     actor_optimizers[policy_id].step()
+
+        # --- MODIFICATION: Log the new scheduled values to TensorBoard ---
         avg_return = np.mean(episodic_returns) if episodic_returns else 0.0
-        pbar.set_description(f"Update {update}, Avg Return: {avg_return:.2f}, LR: {new_lr:.2e}")
+        pbar.set_description(
+            f"Update {update}, Avg Return: {avg_return:.2f}, LR: {new_lr:.2e}, EntCoef: {ent_coef:.2e}")
         writer.add_scalar("charts/avg_episodic_return", avg_return, global_step);
         writer.add_scalar("charts/learning_rate", new_lr, global_step)
-        if update > 0 and update % 15 == 0:
+        writer.add_scalar("charts/entropy_coefficient", ent_coef, global_step)
+
+        # (Checkpointing and final saving is unchanged)
+        if update > 0 and update % args.checkpoint_interval == 0:
             save_checkpoint(actors, critics, actor_optimizers, critic_optimizers, update, args.log_path)
             for model in actors.values(): model.eval()
             evaluate_and_render_episode(args, policy_map, actors, device, writer, global_step)
